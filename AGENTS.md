@@ -78,7 +78,7 @@ Comments explain the why and stand on their own. Never cite plans, phases, task 
 
 - The README describes what exists today; planned work is listed under a clearly marked roadmap.
 - Every deliberate simplification versus a production exchange is recorded in the README's trade-offs section when it is made.
-- Diagrams are Mermaid in Markdown, so they render on GitHub and diff as text.
+- Diagrams are SVGs in `docs/` with `-light` and `-dark` variants, embedded via `<picture>` so GitHub picks the one matching the reader's theme.
 
 ## Dependencies
 
