@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# Web
+node_modules/
+/web/dist/
+
+# Recorded market data
+/data/
+
+# Local environment
+.env
+.env.local
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
