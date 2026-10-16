@@ -1,0 +1,10 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Message format shared by every component: commands in, events out, market-data feed."
+
+[lints]
+workspace = true
