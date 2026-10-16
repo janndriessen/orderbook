@@ -6,5 +6,11 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Message format shared by every component: commands in, events out, market-data feed."
 
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true
