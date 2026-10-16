@@ -6,6 +6,9 @@
 //! Prices and quantities are integers (ticks and lots) so that no
 //! floating-point rounding can creep into matching. Integer values stay below
 //! 2^53 so that JavaScript clients represent them exactly.
+//!
+//! TypeScript definitions for the web client are generated from these types
+//! into `web/src/protocol/` whenever the crate's tests run.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +33,7 @@ pub type Ts = u64;
 /// Side of an order or trade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum Side {
     /// Bid: buys at or below its price.
     Buy,
@@ -43,6 +47,7 @@ pub enum Side {
 /// from the source (e.g. the original Hyperliquid block time during replay),
 /// never from the local clock, so a replay produces identical output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Envelope<T> {
     /// Position within the stream.
     pub seq: Seq,
