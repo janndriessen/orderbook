@@ -10,6 +10,10 @@
 //! TypeScript definitions for the web client are generated from these types
 //! into `web/src/protocol/` whenever the crate's tests run.
 
+mod event;
+
+pub use event::Event;
+
 use serde::{Deserialize, Serialize};
 
 /// Unique order identifier, assigned by the order's source.
