@@ -11,8 +11,10 @@
 //! into `web/src/protocol/` whenever the crate's tests run.
 
 mod event;
+mod feed;
 
 pub use event::Event;
+pub use feed::{FeedMessage, Level, MarketInfo};
 
 use serde::{Deserialize, Serialize};
 
