@@ -1,0 +1,103 @@
+/* Design tokens. Components read these and never hold raw colors or sizes. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces and lines, from the page outward. */
+  --color-page: #0b1215;
+  --color-surface: #101a1e;
+  --color-raised: #17242a;
+  --color-line: #1d2c33;
+  --color-line-strong: #2a3d46;
+
+  /* Text, strongest to weakest. */
+  --color-text: #d3dde1;
+  --color-text-muted: #8a9ba3;
+  --color-text-faint: #5d6e76;
+
+  /* Book sides. The depth variants are the same hues, washed out. */
+  --color-bid: #38cfae;
+  --color-ask: #f2627e;
+  --depth-strength: 17%;
+  --color-bid-depth: color-mix(
+    in srgb,
+    var(--color-bid) var(--depth-strength),
+    transparent
+  );
+  --color-ask-depth: color-mix(
+    in srgb,
+    var(--color-ask) var(--depth-strength),
+    transparent
+  );
+
+  /* One hue per engine event. */
+  --color-event-accepted: #6fa3ff;
+  --color-event-trade: #f1c35b;
+  --color-event-replaced: #b995f5;
+  --color-event-canceled: #8fa0a8;
+
+  --color-status-live: var(--color-bid);
+  --color-status-wait: var(--color-event-trade);
+  --color-focus: #8cc4ff;
+
+  /* Type. Numbers are monospaced; labels use the system UI face. */
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas,
+    monospace;
+  --font-ui:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --weight-medium: 500;
+
+  /* Spacing and shape. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --border-width: 1px;
+
+  /* Heights the order book reads back from the DOM to count its rows. They
+     must stay in px: the value is parsed as a number of pixels. */
+  --row-height: 22px;
+  --header-height: 28px;
+  --spread-height: 28px;
+  /* Gap left under each depth bar so neighboring levels read as separate. */
+  --row-gap: 2px;
+  /* Gap above the top band shared by the status line and the book header. */
+  --top-inset: var(--space-2);
+
+  /* Layout. The book and the log each get one pane of this width. */
+  --pane-width: 50vw;
+  --book-max-width: 500px;
+  --log-max-width: 860px;
+  --toggle-size: 24px;
+  --icon-size: 16px;
+  --icon-stroke: 1.5;
+  --status-dot-size: 8px;
+  --z-status: 2;
+  --z-toggle: 3;
+  --log-time-width: 96px;
+  --log-type-width: 76px;
+  --focus-width: 2px;
+
+  /* Motion. Reduced-motion users get instant changes through the duration. */
+  --duration-pane: 520ms;
+  --duration-fast: 140ms;
+  --duration-pulse: 1.2s;
+  --pulse-low-opacity: 0.3;
+  --ease-pane: cubic-bezier(0.65, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-pane: 0ms;
+    --duration-fast: 0ms;
+    --duration-pulse: 0s;
+  }
+}
