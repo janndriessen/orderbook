@@ -1,0 +1,55 @@
+.entry {
+  --event-color: var(--color-text);
+
+  display: grid;
+  grid-template-columns: var(--log-time-width) var(--log-type-width) 1fr;
+  align-items: baseline;
+  height: var(--row-height);
+  padding-inline: var(--space-3);
+  border-inline-start: var(--space-1) solid var(--event-color);
+}
+
+.entry[data-type="accepted"] {
+  --event-color: var(--color-event-accepted);
+}
+
+.entry[data-type="trade"] {
+  --event-color: var(--color-event-trade);
+}
+
+.entry[data-type="replaced"] {
+  --event-color: var(--color-event-replaced);
+}
+
+.entry[data-type="canceled"] {
+  --event-color: var(--color-event-canceled);
+}
+
+.time {
+  color: var(--color-text-faint);
+}
+
+.type {
+  color: var(--event-color);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-medium);
+}
+
+.detail {
+  display: flex;
+  gap: var(--space-1);
+  color: var(--color-text);
+}
+
+.buy {
+  color: var(--color-bid);
+}
+
+.sell {
+  color: var(--color-ask);
+}
+
+.ref {
+  margin-inline-start: auto;
+  color: var(--color-text-faint);
+}

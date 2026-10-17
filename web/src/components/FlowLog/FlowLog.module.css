@@ -1,0 +1,108 @@
+.log {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* The extra bottom padding lowers the rule while the controls stay centered
+     in the same band as the book header. */
+  height: calc(var(--header-height) + var(--space-2));
+  flex: none;
+  /* The right padding leaves room for the log toggle, which sits on top. */
+  padding: 0 calc(var(--space-3) * 2 + var(--toggle-size)) var(--space-2)
+    var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-line);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+
+.filters {
+  display: flex;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.legend {
+  position: absolute;
+  width: var(--border-width);
+  height: var(--border-width);
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.filter {
+  position: relative;
+}
+
+/* The toolbar has no surface of its own: like the book header, its controls
+   sit on the page above a single rule, and only the list below is a panel. */
+
+/* The native radio stays in the tab order but is drawn as a text button. */
+.filter input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.filter span {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+}
+
+.filter input:checked + span {
+  background: var(--color-raised);
+  color: var(--color-text);
+}
+
+.filter input:focus-visible + span {
+  outline: var(--focus-width) solid var(--color-focus);
+}
+
+.pending {
+  margin-inline-start: auto;
+  color: var(--color-event-trade);
+}
+
+.pause {
+  margin-inline-start: auto;
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-width) solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+
+.pending + .pause {
+  margin-inline-start: 0;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border-inline: var(--border-width) solid var(--color-line);
+  background: var(--color-surface);
+}
+
+.empty {
+  margin: var(--space-5) 0;
+  color: var(--color-text-faint);
+  text-align: center;
+}

@@ -1,0 +1,28 @@
+.bid {
+  --side-color: var(--color-bid);
+  --side-depth: var(--color-bid-depth);
+}
+
+.ask {
+  --side-color: var(--color-ask);
+  --side-depth: var(--color-ask-depth);
+}
+
+/* The depth bar is the row's own background, grown from the left edge and
+   stopping short of the row's bottom so neighboring bars stay apart. */
+.bid,
+.ask {
+  background:
+    linear-gradient(
+      to right,
+      var(--side-depth) calc(var(--depth) * 100%),
+      transparent 0
+    )
+    top / 100% calc(100% - var(--row-gap)) no-repeat;
+  height: var(--row-height);
+}
+
+.price {
+  color: var(--side-color);
+  text-align: left;
+}

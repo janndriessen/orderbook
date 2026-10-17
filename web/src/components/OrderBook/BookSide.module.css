@@ -1,0 +1,8 @@
+/* Unused rows are pseudo-elements, so they take up space without being
+   rows in the accessibility tree. */
+.asks::before,
+.bids::after {
+  content: "";
+  display: table-row;
+  height: calc(var(--empty-rows) * var(--row-height));
+}

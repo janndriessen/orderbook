@@ -1,0 +1,33 @@
+.status {
+  position: fixed;
+  top: var(--top-inset);
+  height: var(--header-height);
+  left: var(--space-4);
+  z-index: var(--z-status);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+}
+
+.dot {
+  width: var(--status-dot-size);
+  height: var(--status-dot-size);
+  border-radius: 50%;
+  background: var(--color-status-wait);
+}
+
+.status[data-status="live"] .dot {
+  background: var(--color-status-live);
+}
+
+.status:not([data-status="live"]) .dot {
+  animation: pulse var(--duration-pulse) ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: var(--pulse-low-opacity);
+  }
+}

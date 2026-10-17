@@ -1,0 +1,22 @@
+.bar {
+  height: calc(var(--spread-height) + var(--spread-extra, 0px));
+  background: var(--color-surface);
+}
+
+.content {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.label {
+  color: var(--color-text-faint);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+
+.value {
+  color: var(--color-text);
+  font-weight: var(--weight-medium);
+}

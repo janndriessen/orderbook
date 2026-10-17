@@ -1,0 +1,39 @@
+.toggle {
+  position: fixed;
+  top: calc(var(--top-inset) + (var(--header-height) - var(--toggle-size)) / 2);
+  right: var(--toggle-right);
+  z-index: var(--z-toggle);
+  display: grid;
+  place-items: center;
+  width: var(--toggle-size);
+  height: var(--toggle-size);
+  padding: 0;
+  border: var(--border-width) solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  /* The jump to the other corner waits until the fade-out has hidden it. */
+  transition:
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    right 0s linear var(--duration-fast);
+}
+
+.toggle:hover,
+.toggle[aria-expanded="true"] {
+  border-color: var(--color-text-faint);
+  color: var(--color-text);
+}
+
+.icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+.icon path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--icon-stroke);
+  stroke-linecap: round;
+}

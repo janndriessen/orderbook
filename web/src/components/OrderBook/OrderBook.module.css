@@ -1,0 +1,46 @@
+/* The header shares the top band with the status line, and the table runs to
+   the bottom edge: rows keep their whole-pixel height and the spread bar takes
+   the few pixels left over after counting, so every edge stays sharp. */
+.book {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: var(--top-inset) var(--space-4) 0;
+}
+
+.table {
+  width: 100%;
+  table-layout: fixed;
+  /* Separate borders stay inside their cells; collapsed ones straddle the
+     cell edge and push every row below onto a half pixel. */
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.table th {
+  height: var(--header-height);
+  color: var(--color-text-faint);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  text-align: right;
+  border-bottom: var(--border-width) solid var(--color-line);
+}
+
+.table th:first-child {
+  text-align: left;
+}
+
+.table td {
+  padding: 0 var(--space-2);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.table td:first-child {
+  text-align: left;
+}

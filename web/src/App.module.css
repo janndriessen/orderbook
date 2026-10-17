@@ -1,0 +1,84 @@
+/*
+ * Two panes, each --pane-width wide, side by side in a clipped viewport.
+ *
+ * Open:   book pane at 0, log pane at 0, so the screen is split in equal
+ *         halves and each slot is centered inside its half.
+ * Closed: the book pane is moved right by half a pane, which puts its centered
+ *         slot in the middle of the screen, and the log pane is moved a full
+ *         pane right, which parks it just past the right edge.
+ *
+ * Both panes share one transform transition, so they move as a unit.
+ *
+ * The log toggle sits in the top band: in the page corner while the log is
+ * closed, and at the right end of the log's toolbar while it is open. The
+ * open offset is the gap beside the centered log slot plus the toolbar's
+ * inline padding.
+ */
+.layout {
+  --book-shift: calc(var(--pane-width) / 2);
+  --log-shift: var(--pane-width);
+  --toggle-right: var(--space-4);
+
+  position: fixed;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.layout[data-log-open="true"] {
+  --book-shift: 0px;
+  --log-shift: 0px;
+  --toggle-right: calc(
+    (var(--pane-width) - min(var(--pane-width), var(--log-max-width))) /
+    2 +
+    var(--space-3)
+  );
+}
+
+.bookPane,
+.logPane {
+  flex: none;
+  width: var(--pane-width);
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  transition:
+    transform var(--duration-pane) var(--ease-pane),
+    opacity var(--duration-pane) var(--ease-pane);
+}
+
+.bookPane {
+  transform: translateX(var(--book-shift));
+}
+
+.logPane {
+  transform: translateX(var(--log-shift));
+  opacity: 0;
+}
+
+.layout[data-log-open="true"] .logPane {
+  opacity: 1;
+}
+
+.bookSlot,
+.logSlot {
+  width: 100%;
+  height: 100%;
+}
+
+.bookSlot {
+  max-width: var(--book-max-width);
+}
+
+.logSlot {
+  max-width: var(--log-max-width);
+  padding-top: var(--top-inset);
+}
+
+.waiting {
+  display: grid;
+  height: 100%;
+  margin: 0;
+  place-items: center;
+  color: var(--color-text-faint);
+}
