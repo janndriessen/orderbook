@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 /// Unique order identifier, assigned by the order's source.
 pub type OrderId = u64;
 
-/// Position of a message within its stream; gap-free and strictly increasing.
+/// Position of a message within its stream; strictly increasing.
+///
+/// Gap-free on the stream that assigns it. A consumer that forwards only part
+/// of a stream keeps the original numbers, so gaps there are expected.
 pub type Seq = u64;
 
 /// Price in ticks. Signed so that spreads and price differences need no casts.

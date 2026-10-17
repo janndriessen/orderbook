@@ -26,7 +26,7 @@ export type FeedMessage = {
    */
   asks: Array<Level>;
   /**
-   * Most recent engine events, oldest first, to seed the flow log.
+   * Most recent flow events, oldest first, to seed the flow log.
    */
   events: Array<Envelope<Event>>;
 } | {
@@ -44,7 +44,7 @@ export type FeedMessage = {
    */
   asks: Array<Level>;
   /**
-   * Engine events since the previous message, oldest first.
+   * Flow events since the previous message, oldest first.
    */
   events: Array<Envelope<Event>>;
 };

@@ -4,6 +4,11 @@
 //! Each message's `seq` is exactly one greater than the previous one; on a gap
 //! the client discards its state and reconnects, which starts with a fresh
 //! snapshot.
+//!
+//! The `events` carry the order flow: every engine event except `L2Update`,
+//! whose effect already arrives as level changes. They keep the engine's
+//! `seq`, which therefore skips the omitted updates; gap detection relies on
+//! the feed's own `seq` alone.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +51,7 @@ pub enum FeedMessage {
         bids: Vec<Level>,
         /// Ask levels, best (lowest) first.
         asks: Vec<Level>,
-        /// Most recent engine events, oldest first, to seed the flow log.
+        /// Most recent flow events, oldest first, to seed the flow log.
         events: Vec<Envelope<Event>>,
     },
     /// Changes since the previous message.
@@ -57,7 +62,7 @@ pub enum FeedMessage {
         bids: Vec<Level>,
         /// Ask levels that changed.
         asks: Vec<Level>,
-        /// Engine events since the previous message, oldest first.
+        /// Flow events since the previous message, oldest first.
         events: Vec<Envelope<Event>>,
     },
 }
