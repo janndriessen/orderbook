@@ -2,7 +2,7 @@
 
 An exchange-style order book service and matching engine for a single market (BTC-USD), driven by order flow derived from Hyperliquid data. A full-screen web UI visualizes the live book and a log of the events that produced it. The project mirrors how real venues are built and documents where it deliberately does not.
 
-> Early stage: only the shared protocol crate exists so far. See [Status](#status).
+> Early stage: the protocol and a live feed driven by a random-walk stand-in for the engine exist so far. See [Status](#status).
 
 ## Architecture
 
@@ -33,7 +33,7 @@ Desktop only, in the dense style of a professional exchange order book. The book
 Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers receive JSON over WebSocket. TypeScript types are generated from the Rust protocol crate with [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
 
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`), with generated TypeScript types checked in CI
-- [ ] Publisher, dummy random-walk source, WebSocket
+- [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [ ] Web UI
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator and invariant checks
@@ -45,20 +45,28 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 The pinned toolchain (Rust 1.99.1, see `rust-toolchain.toml`) is installed automatically by [rustup](https://rustup.rs).
 
 ```bash
-cargo test --workspace
+cargo test --workspace                   # also regenerates the TypeScript types in web/src/protocol/
+cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
 ```
 
-This also regenerates the TypeScript types in `web/src/protocol/`. Those files are generated and committed; do not edit them by hand.
+The generated TypeScript files are committed; do not edit them by hand.
+
+| Variable         | Default          | Meaning                                                      |
+|------------------|------------------|--------------------------------------------------------------|
+| `ORDERBOOK_ADDR` | `127.0.0.1:8080` | Listen address                                               |
+| `ORDERBOOK_SEED` | clock-derived    | Seed of the random-walk source; the same seed gives the same event stream |
+| `RUST_LOG`       | `info`           | Log filter                                                   |
 
 ## Repository layout
 
 ```
 crates/protocol/   shared message format; source of the TypeScript types
+crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
 web/src/protocol/  generated TypeScript types
 docs/              diagrams
 ```
 
-Planned, not yet present: `crates/engine` (gateway, book, matching, publisher), `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, the React app in `web/`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
+Planned, not yet present: the gateway and matching engine in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, the React app in `web/`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
@@ -68,4 +76,6 @@ Planned, not yet present: `crates/engine` (gateway, book, matching, publisher), 
 - **Gateways:** one simple gateway with stateless checks only. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (~50 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients.
+- **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
+- **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Infrastructure:** a small shared-vCPU cloud server. Production uses dedicated hardware, often co-located, with tuned networking.
