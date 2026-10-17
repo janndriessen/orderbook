@@ -8,24 +8,23 @@ use rand_chacha::ChaCha8Rng;
 
 use super::book::{Order, RestingBook};
 
-/// Starting mid price in ticks.
-const START_MID: Price = 100_000;
+/// Price in ticks that the first order of an empty book is placed at.
+const START_PRICE: Price = 100_000;
 /// Each side is topped up to this many orders before anything else happens,
 /// which also keeps both sides non-empty.
 const MIN_ORDERS_PER_SIDE: usize = 20;
 /// Above this many resting orders, cancels outweigh new orders, which keeps
 /// the book near a realistic size instead of growing without bound.
 const TARGET_ORDERS: usize = 300;
-/// Furthest a new order rests from the mid, in ticks.
-const MAX_OFFSET: Price = 60;
-/// Largest order, in lots (0.5 BTC at five quantity decimals).
-const MAX_QTY: Qty = 50_000;
-/// A step moves the mid by one tick with probability 1 in this many.
-const DRIFT_ODDS: u32 = 4;
+/// Furthest a new order rests behind its side's best price, in ticks.
+const MAX_DEPTH: Price = 30;
 /// Largest price change of a replace, in ticks.
 const MAX_REPLACE_SHIFT: Price = 3;
+/// One taker in this many sweeps the whole touch level, which is what moves
+/// the best price at a realistic rate; the rest are mostly small.
+const SWEEP_ODDS: u32 = 16;
 /// Venue-time gap between two steps, in microseconds.
-const STEP_GAP_US: std::ops::RangeInclusive<Ts> = 2_000..=10_000;
+const STEP_GAP_US: std::ops::RangeInclusive<Ts> = 20_000..=100_000;
 
 /// Events of one step and the venue time that passes before the next one.
 #[derive(Debug)]
@@ -36,8 +35,8 @@ pub struct Step {
     pub wait: Duration,
 }
 
-/// A reproducible stream of engine events: limit orders placed around a
-/// drifting mid, some canceled or replaced, and occasional takers.
+/// A reproducible stream of engine events: limit orders placed around
+/// the touch, some canceled or replaced, and occasional takers.
 ///
 /// The same seed and start time always produce the same events. The stream
 /// keeps the invariants a real engine would: best bid below best ask, no
@@ -47,9 +46,10 @@ pub struct Step {
 pub struct RandomWalk {
     rng: ChaCha8Rng,
     book: RestingBook,
-    mid: Price,
     next_order_id: OrderId,
     next_seq: Seq,
+    /// Side of the latest taker; the next one tends to repeat it.
+    last_taker: Side,
     clock: Ts,
 }
 
@@ -59,9 +59,9 @@ impl RandomWalk {
         Self {
             rng: ChaCha8Rng::seed_from_u64(seed),
             book: RestingBook::default(),
-            mid: START_MID,
             next_order_id: 1,
             next_seq: 1,
+            last_taker: Side::Buy,
             clock: start_ts,
         }
     }
@@ -70,7 +70,6 @@ impl RandomWalk {
     pub fn step(&mut self) -> Step {
         let gap = self.rng.random_range(STEP_GAP_US);
         self.clock += gap;
-        self.drift_mid();
 
         let mut out = Vec::new();
         if self.book.order_count(Side::Buy) < MIN_ORDERS_PER_SIDE {
@@ -86,18 +85,6 @@ impl RandomWalk {
         }
     }
 
-    /// Nudges the mid, then keeps it inside the spread: the reference for new
-    /// orders then follows the touch that takers and cancels move, instead of
-    /// wandering off and piling orders up against a clamp.
-    fn drift_mid(&mut self) {
-        if self.rng.random_range(0..DRIFT_ODDS) == 0 {
-            self.mid += self.rng.random_range(-1..=1);
-        }
-        if let (Some(bid), Some(ask)) = (self.book.best(Side::Buy), self.book.best(Side::Sell)) {
-            self.mid = self.mid.clamp(bid, ask);
-        }
-    }
-
     fn random_action(&mut self, out: &mut Vec<Envelope<Event>>) {
         let side = self.random_side();
         let place_below = if self.book.len() > TARGET_ORDERS {
@@ -110,9 +97,17 @@ impl RandomWalk {
             self.place(side, out);
         } else if roll < 80 {
             self.cancel(out);
-        } else if roll < 92 {
+        } else if roll < 94 {
             self.replace(out);
         } else {
+            // Takers run in streaks, which lets the price trend for a while
+            // before it turns instead of jittering around one level.
+            let side = if self.rng.random_range(0..4) == 0 {
+                opposite(self.last_taker)
+            } else {
+                self.last_taker
+            };
+            self.last_taker = side;
             self.take(side, out);
         }
     }
@@ -125,8 +120,15 @@ impl RandomWalk {
         }
     }
 
+    /// A heavy-tailed size in lots (five quantity decimals): mostly dust,
+    /// rarely up to 1.5 BTC. Integer tiers stand in for a continuous tail.
     fn random_qty(&mut self) -> Qty {
-        self.rng.random_range(1..=MAX_QTY)
+        let tier = match self.rng.random_range(0..100) {
+            0..75 => 1..=100,
+            75..97 => 101..=6_000,
+            _ => 6_001..=150_000,
+        };
+        self.rng.random_range(tier)
     }
 
     fn emit(&mut self, out: &mut Vec<Envelope<Event>>, body: Event) {
@@ -157,13 +159,23 @@ impl RandomWalk {
         }
     }
 
-    /// Rests a new order near the mid; nearer prices are more likely.
+    /// Rests a new order at or behind the side's best price, or one tick
+    /// inside the spread when there is room. While a side is empty it follows
+    /// the other side's best price, so the book opens about a tick wide. Most orders land a little away from the touch so
+    /// the inside is not replaced constantly; the occasional improvement
+    /// closes a spread that takers have opened.
     fn place(&mut self, side: Side, out: &mut Vec<Envelope<Event>>) {
-        let near = self.rng.random_range(1..=MAX_OFFSET);
-        let offset = near.min(self.rng.random_range(1..=MAX_OFFSET));
+        let reference = (self.book.best(side))
+            .or_else(|| self.book.best(opposite(side)))
+            .unwrap_or(START_PRICE);
+        let behind = match self.rng.random_range(0..100) {
+            0..30 => -1,
+            30..50 => 0,
+            _ => self.rng.random_range(1..=MAX_DEPTH),
+        };
         let wanted = match side {
-            Side::Buy => self.mid - offset,
-            Side::Sell => self.mid + offset,
+            Side::Buy => reference - behind,
+            Side::Sell => reference + behind,
         };
         let price = self.passive(side, wanted);
         let qty = self.random_qty();
@@ -273,7 +285,11 @@ impl RandomWalk {
         }
         // The taker is a marketable limit order priced at the touch.
         let total = self.book.total(maker_side, price);
-        let taker_qty = self.rng.random_range(1..=total);
+        let taker_qty = if self.rng.random_range(0..SWEEP_ODDS) == 0 {
+            total
+        } else {
+            self.random_qty().min(total)
+        };
         let taker_id = self.next_order_id;
         self.next_order_id += 1;
         self.emit(
@@ -520,25 +536,32 @@ mod tests {
     }
 
     #[test]
-    fn long_run_stays_bounded_and_anchored_to_the_touch() {
-        let mut walk = RandomWalk::new(3, 0);
-        for _ in 0..200_000 {
-            walk.step();
-            let (Some(bid), Some(ask)) = (walk.book.best(Side::Buy), walk.book.best(Side::Sell))
-            else {
-                continue;
-            };
+    fn long_run_stays_bounded_with_a_tight_spread() {
+        // The thresholds are empirical regression bounds with headroom over
+        // what these seeds produce, not limits derived from the model.
+        for seed in 1..=4 {
+            let mut walk = RandomWalk::new(seed, 0);
+            let (mut steps, mut one_tick, mut widest, mut largest) = (0, 0, 0, 0);
+            for _ in 0..50_000 {
+                walk.step();
+                let (Some(bid), Some(ask)) =
+                    (walk.book.best(Side::Buy), walk.book.best(Side::Sell))
+                else {
+                    continue;
+                };
+                steps += 1;
+                one_tick += usize::from(ask - bid == 1);
+                widest = widest.max(ask - bid);
+                largest = largest.max(walk.book.len());
+            }
             assert!(
-                walk.book.len() <= TARGET_ORDERS + 50,
-                "book grew to {}",
-                walk.book.len()
+                one_tick * 10 >= steps * 9,
+                "seed {seed}: spread was 1 tick in {one_tick}/{steps} steps"
             );
-            assert!(ask - bid <= 20, "spread widened to {}", ask - bid);
-            // The touch moves within a step after the mid is re-anchored, so allow slack.
+            assert!(widest <= 20, "seed {seed}: spread widened to {widest}");
             assert!(
-                (bid - MAX_OFFSET..=ask + MAX_OFFSET).contains(&walk.mid),
-                "mid {} strayed from the touch {bid}/{ask}",
-                walk.mid
+                largest <= TARGET_ORDERS + 50,
+                "seed {seed}: book grew to {largest}"
             );
         }
     }
