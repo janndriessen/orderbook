@@ -34,7 +34,7 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 
 - **The protocol is the contract.** Every external source enters through an adapter that translates into `crates/protocol`; nothing else crosses a component boundary. Protocol changes are proposed, never slipped in.
 - **The engine is deterministic.** Same command sequence in, same event sequence out. No clocks, randomness, I/O, or hash-iteration order in the matching path; timestamps come from the commands.
-- **The engine runs alone.** One dedicated OS thread, not a Tokio task. No locks, no async, no database in the hot path. Bounded queues are its only link to the rest of the service, and it never waits on the publisher.
+- **The engine runs alone.** One dedicated OS thread, not a Tokio task. No locks, no async, no database in the hot path. Bounded queues are its only link to the rest of the service. It never touches network I/O; when its output queue is full it waits (backpressure) and never drops events.
 - **Integers for money.** Prices are ticks (`i64`), sizes are lots (`u64`). No floats in the engine or the protocol; conversion to decimals happens only for display.
 - **Price-time priority.** Price levels sorted per side, FIFO within a level. Any deviation (e.g. Hyperliquid's in-block ordering) lives in an adapter or replayer, not in the book.
 - **The gateway checks only what it can know.** Stateless checks (tick, size, duplicate id) in the gateway; anything that needs book state is the engine's to reject.
@@ -73,6 +73,8 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 ## Code comments
 
 Comments explain the why and stand on their own. Never cite plans, phases, task ids, or review rounds; that context belongs in commit messages and docs.
+
+Never name real exchanges or trading venues in code, comments, tests, or docs; describe the practice instead ("production venues"). The one exception is Hyperliquid where it is the actual data source (adapter, replay, oracle).
 
 ## Docs
 

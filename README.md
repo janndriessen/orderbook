@@ -26,7 +26,7 @@ The diagram shows the target design. Principles:
   <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the bottom right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half." src="docs/ui-layout-light.svg">
 </picture>
 
-Desktop only, styled after the Hyperliquid order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
+Desktop only, in the dense style of a professional exchange order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
 
 ## Status
 
@@ -62,7 +62,7 @@ Planned, not yet present: `crates/engine` (gateway, book, matching, publisher), 
 
 ## Trade-offs vs. production exchanges
 
-- **Replication:** a single engine instance. Production runs several identical replicas kept in sync by consensus (Raft via Aeron Cluster at Coinbase, validator consensus at Hyperliquid) for instant failover.
+- **Replication:** a single engine instance. Production runs several identical replicas kept in sync by a consensus protocol such as Raft, for instant failover.
 - **Persistence:** no journal or snapshots; state is lost on restart. Production journals every input and snapshots the book for fast recovery.
 - **Markets:** one market (BTC-USD). Production shards many markets across engines, each on a pinned CPU core.
 - **Gateways:** one simple gateway with stateless checks only. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
