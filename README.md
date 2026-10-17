@@ -2,7 +2,7 @@
 
 An exchange-style order book service and matching engine for a single market (BTC-USD), driven by order flow derived from Hyperliquid data. A full-screen web UI visualizes the live book and a log of the events that produced it. The project mirrors how real venues are built and documents where it deliberately does not.
 
-> Early stage: the protocol and a live feed driven by a random-walk stand-in for the engine exist so far. See [Status](#status).
+> Early stage: the protocol, a live feed driven by a random-walk stand-in for the engine, and the web UI exist so far. See [Status](#status).
 
 ## Architecture
 
@@ -23,7 +23,7 @@ The diagram shows the target design. Principles:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ui-layout-dark.svg">
-  <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the bottom right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half." src="docs/ui-layout-light.svg">
+  <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the top right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half, with the toggle at the right end of its toolbar." src="docs/ui-layout-light.svg">
 </picture>
 
 Desktop only, in the dense style of a professional exchange order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
@@ -34,7 +34,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`), with generated TypeScript types checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
-- [ ] Web UI
+- [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator and invariant checks
 - [ ] Hyperliquid adapter and replayer
@@ -51,6 +51,13 @@ cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.
 
 The generated TypeScript files are committed; do not edit them by hand.
 
+To run the web UI against the feed (Node 24, see `web/.nvmrc`, and pnpm):
+
+```bash
+pnpm -C web install
+pnpm -C web dev                          # http://localhost:5173, /ws is proxied to the feed server
+```
+
 | Variable         | Default          | Meaning                                                      |
 |------------------|------------------|--------------------------------------------------------------|
 | `ORDERBOOK_ADDR` | `127.0.0.1:8080` | Listen address                                               |
@@ -62,11 +69,11 @@ The generated TypeScript files are committed; do not edit them by hand.
 ```
 crates/protocol/   shared message format; source of the TypeScript types
 crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
-web/src/protocol/  generated TypeScript types
+web/               React frontend; src/protocol/ holds the generated TypeScript types
 docs/              diagrams
 ```
 
-Planned, not yet present: the gateway and matching engine in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, the React app in `web/`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
+Planned, not yet present: the gateway and matching engine in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
@@ -78,4 +85,5 @@ Planned, not yet present: the gateway and matching engine in `crates/engine`, `c
 - **Market data:** JSON over WebSocket, batched (~50 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients.
 - **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
+- **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.
 - **Infrastructure:** a small shared-vCPU cloud server. Production uses dedicated hardware, often co-located, with tuned networking.

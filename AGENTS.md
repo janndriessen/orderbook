@@ -61,7 +61,7 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 - `type` over `interface`; no `any` (use `unknown` and narrow); `import type` for type-only imports.
 - The feed is the source of truth: apply snapshots and diffs by sequence number, detect gaps, resync from a snapshot. Never derive book state from the event log.
 - Prices and sizes arrive as integer ticks and lots; convert with the market's tick and lot size and format with `Intl.NumberFormat`.
-- Updates arrive every ~50 ms: keep renders cheap, give rows stable keys, and virtualize unbounded lists (the flow log). Measure before adding `memo`.
+- Updates arrive every ~50 ms: keep renders cheap, give rows stable keys, and never render an unbounded list: cap it (the flow log keeps the newest entries) or virtualize it. Measure before adding `memo`.
 - Accessibility: semantic elements, labels on icon-only buttons, keyboard reachable.
 
 ## Tests
