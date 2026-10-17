@@ -19,7 +19,7 @@ pub use walk::RandomWalk;
 /// The source waits when the queue is full instead of dropping events, so the
 /// capacity only has to absorb bursts and publisher scheduling hiccups, not
 /// sustained overload. At about 38 events per second, 4096 slots hold well
-/// over a minute of output, far more than the publisher's 50 ms tick needs.
+/// over a minute of output, far more than the publisher's 100 ms tick needs.
 pub const QUEUE_CAPACITY: usize = 4096;
 
 /// Starts the source thread.

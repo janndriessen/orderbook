@@ -16,7 +16,7 @@ The diagram shows the target design. Principles:
 - **Own protocol, adapters at the edge.** Every external source is translated into `crates/protocol` by an adapter. The engine only speaks this protocol, so swapping archived data for a live node means a new adapter and no engine change.
 - **Single-threaded, deterministic engine.** One dedicated OS thread, in memory, price-time priority, no locks or database in the hot path. The same command sequence always produces the same event sequence; timestamps come from the input stream, never from a clock.
 - **Integers for money.** Prices are ticks (`i64`), quantities are lots (`u64`). Decimals appear only at display time.
-- **Publisher batching with snapshot and sequenced diffs.** The publisher keeps its own aggregated copy of the book and sends one combined diff every ~50 ms (design target). New clients receive a snapshot first; every message carries a sequence number, so clients detect gaps and resync from a snapshot.
+- **Publisher batching with snapshot and sequenced diffs.** The publisher keeps its own aggregated copy of the book and sends one combined diff every 100 ms. New clients receive a snapshot first; every message carries a sequence number, so clients detect gaps and resync from a snapshot.
 - **Bounded queues only.** The engine's sole link to the networked side (Tokio, Axum) is bounded in-memory queues, and it never waits on the publisher.
 
 ## Web UI
@@ -82,7 +82,7 @@ Planned, not yet present: the gateway and matching engine in `crates/engine`, `c
 - **Markets:** one market (BTC-USD). Production shards many markets across engines, each on a pinned CPU core.
 - **Gateways:** one simple gateway with stateless checks only. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
-- **Market data:** JSON over WebSocket, batched (~50 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients.
+- **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients.
 - **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.

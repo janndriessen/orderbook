@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 pub use self::state::{Frame, Publisher, Subscription, encode};
 
 /// Time between two updates.
-pub const TICK: Duration = Duration::from_millis(50);
+pub const TICK: Duration = Duration::from_millis(100);
 
 /// Cloneable access to the running publisher, used by the WebSocket layer.
 #[derive(Debug, Clone)]

@@ -34,7 +34,7 @@
 <path d="M420 388 L448 388" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
 <rect x="450" y="360" width="160" height="56" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.75"/>
 <text x="530.0" y="378" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#9FE1CB" text-anchor="middle" dominant-baseline="central">Publisher</text>
-<text x="530.0" y="398" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5DCAA5" text-anchor="middle" dominant-baseline="central">Batches every 50 ms</text>
+<text x="530.0" y="398" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5DCAA5" text-anchor="middle" dominant-baseline="central">Batches every 100 ms</text>
 <path d="M150 416 L150 434" fill="none" stroke="#9c9a92" stroke-width="1" stroke-dasharray="4 3"/>
 <rect x="70" y="436" width="160" height="36" rx="8" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="150" y="454" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Journal (later)</text>

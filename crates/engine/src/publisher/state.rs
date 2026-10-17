@@ -19,8 +19,8 @@ pub type Frame = Utf8Bytes;
 /// How many recent events a snapshot carries to seed a client's flow log.
 pub const RECENT_EVENTS: usize = 200;
 
-/// Updates a client may fall behind by before it is disconnected: about three
-/// seconds at the 50 ms tick.
+/// Updates a client may fall behind by before it is disconnected: about six
+/// seconds at the 100 ms tick.
 pub const BROADCAST_CAPACITY: usize = 64;
 
 /// A new client's starting point and its subscription to what follows.
