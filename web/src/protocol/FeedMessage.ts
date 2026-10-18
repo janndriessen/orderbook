@@ -47,4 +47,11 @@ export type FeedMessage = {
    * Flow events since the previous message, oldest first.
    */
   events: Array<Envelope<Event>>;
+} | {
+  "type": "heartbeat";
+  /**
+   * The latest `seq` of the feed; a heartbeat does not advance it, so a
+   * client holding a different `seq` missed an update.
+   */
+  seq: number;
 };

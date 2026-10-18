@@ -78,6 +78,46 @@ describe("FeedHandler", () => {
     expect(state.log).toHaveLength(1);
   });
 
+  it("ignores a heartbeat: no state change, no notification", () => {
+    const { handler, last } = setup();
+    handler.start();
+    last().send(wire(snapshot({ events: [accepted(1)] })));
+    const before = handler.getState();
+    const listener = vi.fn();
+    handler.subscribe(listener);
+    last().send(wire({ type: "heartbeat", seq: 1 }));
+    expect(handler.getState()).toBe(before);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("recovers when a heartbeat's seq differs from the held book's", () => {
+    const { handler, sockets, last, waitForReconnect } = setup();
+    handler.start();
+    last().send(wire(snapshot()));
+    const first = last();
+    first.send(wire({ type: "heartbeat", seq: 2 }));
+    expect(first.closed).toBe(true);
+    expect(handler.getState()).toMatchObject({
+      status: "reconnecting",
+      book: null,
+    });
+    waitForReconnect();
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("ignores a heartbeat before the first snapshot", () => {
+    const { handler, sockets, last } = setup();
+    const listener = vi.fn();
+    handler.subscribe(listener);
+    handler.start();
+    listener.mockClear();
+    last().send(wire({ type: "heartbeat", seq: 7 }));
+    expect(handler.getState().status).toBe("connecting");
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.closed).toBe(false);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("applies updates in sequence and grows the log newest first", () => {
     const { handler, last } = setup();
     handler.start();

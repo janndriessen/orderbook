@@ -1,9 +1,13 @@
 //! Market-data feed: aggregated book state and the event log, sent to clients.
 //!
 //! A client receives one `Snapshot`, then an `Update` roughly every 100 ms.
-//! Each message's `seq` is exactly one greater than the previous one; on a gap
-//! the client discards its state and reconnects, which starts with a fresh
-//! snapshot.
+//! The `seq` of each snapshot and update is exactly one greater than that of
+//! the previous one; on a gap the client discards its state and reconnects,
+//! which starts with a fresh snapshot.
+//!
+//! A `Heartbeat` is a liveness signal for an otherwise idle feed. It repeats
+//! the latest `seq` and does not advance it, so a client that holds a different
+//! `seq` knows it missed an update.
 //!
 //! The `events` carry the order flow: every engine event except `L2Update`,
 //! whose effect already arrives as level changes. They keep the engine's
@@ -65,12 +69,33 @@ pub enum FeedMessage {
         /// Flow events since the previous message, oldest first.
         events: Vec<Envelope<Event>>,
     },
+    /// Liveness signal for an otherwise idle feed.
+    Heartbeat {
+        /// The latest `seq` of the feed; a heartbeat does not advance it, so a
+        /// client holding a different `seq` missed an update.
+        seq: Seq,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn heartbeat_has_a_fixed_wire_form() {
+        let msg = FeedMessage::Heartbeat { seq: 42 };
+        let expected = json!({ "type": "heartbeat", "seq": 42 });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"type":"heartbeat","seq":42}"#
+        );
+        assert_eq!(
+            serde_json::from_value::<FeedMessage>(expected).unwrap(),
+            msg
+        );
+    }
 
     #[test]
     fn update_round_trips() {

@@ -328,6 +328,9 @@ mod tests {
                     self.seq = seq;
                     self.event_seqs.extend(events.iter().map(|e| e.seq));
                 }
+                FeedMessage::Heartbeat { seq } => {
+                    assert_eq!(seq, self.seq, "a heartbeat must not advance the feed");
+                }
             }
         }
     }

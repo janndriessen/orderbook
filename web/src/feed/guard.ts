@@ -80,6 +80,9 @@ export function parseFeedMessage(raw: unknown): FeedMessage | null {
   } catch {
     return null;
   }
+  if (isDict(value) && value.type === "heartbeat") {
+    return ints(value, ["seq"], 0) ? (value as FeedMessage) : null;
+  }
   if (
     !isDict(value) ||
     !ints(value, ["seq"], 0) ||

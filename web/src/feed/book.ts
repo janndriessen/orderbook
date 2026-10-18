@@ -46,7 +46,7 @@ function patch(levels: Levels, changes: Level[]): Levels {
  */
 export function applyMessage(
   book: BookState | null,
-  message: FeedMessage,
+  message: Exclude<FeedMessage, { type: "heartbeat" }>,
 ): BookState | null {
   if (message.type === "snapshot") {
     return {

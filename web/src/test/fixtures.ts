@@ -54,7 +54,9 @@ type Parts = {
 };
 
 /** Bids 100,000.0 down and asks 100,000.5 up, in 0.5 steps (1 tick = 0.1). */
-export function snapshot(parts: Parts = {}): FeedMessage {
+export function snapshot(
+  parts: Parts = {},
+): Extract<FeedMessage, { type: "snapshot" }> {
   return {
     type: "snapshot",
     seq: parts.seq ?? 1,
@@ -73,7 +75,9 @@ export function snapshot(parts: Parts = {}): FeedMessage {
   };
 }
 
-export function update(parts: Parts = {}): FeedMessage {
+export function update(
+  parts: Parts = {},
+): Extract<FeedMessage, { type: "update" }> {
   return {
     type: "update",
     seq: parts.seq ?? 2,

@@ -32,7 +32,7 @@ Desktop only, in the dense style of a professional exchange order book. The book
 
 Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers receive JSON over WebSocket. TypeScript types are generated from the Rust protocol crate with [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
 
-- [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`), with generated TypeScript types checked in CI
+- [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [ ] Matching engine and hand-written scenarios

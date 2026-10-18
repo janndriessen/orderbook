@@ -130,6 +130,11 @@ export class FeedHandler {
 
   #receive(data: unknown): void {
     const message = parseFeedMessage(data);
+    if (message?.type === "heartbeat") {
+      const held = this.#state.book;
+      if (held && message.seq !== held.seq) this.#recover();
+      return;
+    }
     const book = message && applyMessage(this.#state.book, message);
     if (!message || !book) {
       this.#recover();
