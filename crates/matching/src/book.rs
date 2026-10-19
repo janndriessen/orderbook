@@ -96,6 +96,11 @@ impl OrderBook {
         Ok(())
     }
 
+    /// Whether an order with this id is resting in the book.
+    pub fn contains(&self, order_id: OrderId) -> bool {
+        self.orders.contains_key(&order_id)
+    }
+
     /// Removes a resting order, or returns `None` if the id is unknown.
     ///
     /// Scans the order's level for its place in the queue, so the cost is
