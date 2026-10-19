@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-protocol = { path = "../protocol" }
+protocol.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 serde_json.workspace = true

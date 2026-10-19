@@ -20,6 +20,7 @@ unwrap_used = "warn"
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.34"
+protocol = { path = "crates/protocol" }
 rand = "0.10.3"
 rand_chacha = "0.10.0"
 serde = { version = "1.0.229", features = ["derive"] }
