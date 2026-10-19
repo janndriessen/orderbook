@@ -5,11 +5,13 @@
 //! when to call these methods.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use axum::extract::ws::Utf8Bytes;
 use protocol::{Envelope, Event, FeedMessage, MarketInfo, Seq};
 use tokio::sync::broadcast;
 
+use super::TICK;
 use super::book::AggregatedBook;
 
 /// A serialized feed message. Cloning shares the bytes, so every client gets
@@ -19,16 +21,35 @@ pub type Frame = Utf8Bytes;
 /// How many recent events a snapshot carries to seed a client's flow log.
 pub const RECENT_EVENTS: usize = 200;
 
-/// Updates a client may fall behind by before it is disconnected: about six
+/// Silence after which an idle feed sends a heartbeat, and the gap between
+/// further ones.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Idle ticks that make up one [`HEARTBEAT_INTERVAL`]. Counting ticks keeps
+/// the state machine free of clocks.
+const IDLE_TICKS_PER_HEARTBEAT: u32 = (HEARTBEAT_INTERVAL.as_millis() / TICK.as_millis()) as u32;
+
+// A tick that does not divide the interval would heartbeat early or late, and
+// one longer than the interval would heartbeat on every idle tick.
+const _: () = assert!(
+    TICK.as_millis() <= HEARTBEAT_INTERVAL.as_millis()
+        && HEARTBEAT_INTERVAL
+            .as_millis()
+            .is_multiple_of(TICK.as_millis()),
+    "TICK must divide HEARTBEAT_INTERVAL exactly"
+);
+
+/// Messages a client may fall behind by before it is disconnected: about six
 /// seconds at the 100 ms tick.
 pub const BROADCAST_CAPACITY: usize = 64;
 
 /// A new client's starting point and its subscription to what follows.
 #[derive(Debug)]
 pub struct Subscription {
-    /// Full state as of feed position `seq`; the next frame is `seq + 1`.
+    /// Full state as of feed position `seq`; the next message is a heartbeat
+    /// repeating `seq`, or the update `seq + 1`.
     pub snapshot: FeedMessage,
-    /// Every update sent after the snapshot, and nothing sent before it.
+    /// Every message sent after the snapshot, and nothing sent before it.
     pub updates: broadcast::Receiver<Frame>,
 }
 
@@ -43,6 +64,8 @@ pub struct Publisher {
     pending: Vec<Envelope<Event>>,
     recent: VecDeque<Envelope<Event>>,
     seq: Seq,
+    /// Consecutive ticks that sent nothing.
+    idle_ticks: u32,
     updates: broadcast::Sender<Frame>,
 }
 
@@ -56,6 +79,7 @@ impl Publisher {
             pending: Vec::new(),
             recent: VecDeque::with_capacity(RECENT_EVENTS),
             seq: 0,
+            idle_ticks: 0,
             updates,
         }
     }
@@ -68,8 +92,10 @@ impl Publisher {
     /// Publishes everything ingested since the last tick as one update.
     ///
     /// Returns the update's feed position, or `None` when nothing changed. An
-    /// idle tick sends nothing and consumes no position, so positions stay
-    /// gap-free and clients tell loss from silence by `seq` alone.
+    /// idle tick sends no update and consumes no position, so positions stay
+    /// gap-free. After [`HEARTBEAT_INTERVAL`] of idle ticks it broadcasts a
+    /// heartbeat that repeats the current position, and again after each
+    /// further interval; clients tell loss from silence by `seq`.
     ///
     /// `L2Update` events only move the book. Their content reaches clients as
     /// level changes, so forwarding them would send everything twice; the
@@ -84,8 +110,16 @@ impl Publisher {
             }
         }
         if events.is_empty() && !self.book.has_changes() {
+            self.idle_ticks += 1;
+            if self.idle_ticks >= IDLE_TICKS_PER_HEARTBEAT {
+                self.idle_ticks = 0;
+                let _ = self
+                    .updates
+                    .send(encode(&FeedMessage::Heartbeat { seq: self.seq }));
+            }
             return None;
         }
+        self.idle_ticks = 0;
 
         let (bids, asks) = self.book.take_changes();
         self.seq += 1;
@@ -104,7 +138,8 @@ impl Publisher {
     /// Snapshots the current state and subscribes to later updates.
     ///
     /// Both happen in this one call, between ticks, so the first frame the
-    /// subscription yields is exactly `snapshot.seq + 1`.
+    /// subscription yields is either a heartbeat repeating `snapshot.seq` or the
+    /// update `snapshot.seq + 1`.
     pub fn subscribe(&self) -> Subscription {
         let (bids, asks) = self.book.levels();
         Subscription {
@@ -226,6 +261,59 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    const SECOND: u32 = IDLE_TICKS_PER_HEARTBEAT;
+
+    /// Runs `n` empty ticks and returns what reached the subscriber.
+    fn idle(p: &mut Publisher, rx: &mut broadcast::Receiver<Frame>, n: u32) -> Vec<FeedMessage> {
+        (0..n).for_each(|_| assert_eq!(p.tick(), None));
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|f| serde_json::from_str(f.as_str()).expect("valid frame"))
+            .collect()
+    }
+
+    #[test]
+    fn idle_ticks_send_one_heartbeat_per_second_without_moving_seq() {
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        assert_eq!(SECOND, 10, "one second at the 100 ms tick");
+        let beat = |seq| vec![FeedMessage::Heartbeat { seq }];
+        assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
+        assert_eq!(idle(&mut publisher, &mut rx, 1), beat(0));
+
+        publisher.ingest(accepted(1, 1));
+        publisher.tick();
+        let _ = next_update(&mut rx);
+        for _ in 0..2 {
+            assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
+            assert_eq!(idle(&mut publisher, &mut rx, 1), beat(1));
+        }
+    }
+
+    #[test]
+    fn a_busy_feed_sends_no_heartbeat() {
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        for seq in 1..=3 * u64::from(SECOND) {
+            publisher.ingest(accepted(seq, seq));
+            assert_eq!(publisher.tick(), Some(seq));
+            assert!(matches!(next_update(&mut rx), FeedMessage::Update { .. }));
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_update_restarts_the_idle_count() {
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
+        publisher.ingest(accepted(1, 1));
+        publisher.tick();
+        let _ = next_update(&mut rx);
+        assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
+        let beat = idle(&mut publisher, &mut rx, 1);
+        assert_eq!(beat, vec![FeedMessage::Heartbeat { seq: 1 }]);
+    }
+
     #[test]
     fn snapshot_is_sorted_and_excludes_unticked_events() {
         let mut publisher = Publisher::new(market());
@@ -286,6 +374,7 @@ mod tests {
         asks: BTreeMap<Price, Qty>,
         seq: Seq,
         event_seqs: Vec<Seq>,
+        heartbeats: u32,
     }
 
     impl Client {
@@ -330,6 +419,7 @@ mod tests {
                 }
                 FeedMessage::Heartbeat { seq } => {
                     assert_eq!(seq, self.seq, "a heartbeat must not advance the feed");
+                    self.heartbeats += 1;
                 }
             }
         }
@@ -351,6 +441,7 @@ mod tests {
         let mut publisher = Publisher::new(market());
         let mut flow_seqs = Vec::new();
         let mut clients: Vec<(Client, broadcast::Receiver<Frame>)> = Vec::new();
+        let mut in_last_spell = 0;
 
         for i in 0..600 {
             for envelope in walk.step().events {
@@ -370,6 +461,21 @@ mod tests {
                 publisher.tick();
                 drain(&mut clients);
             }
+            if i % 50 == 0 {
+                // A quiet spell with heartbeats, joined by a client mid-way.
+                publisher.tick();
+                for tick in 0..2 * SECOND {
+                    if tick == SECOND / 2 {
+                        let Subscription { snapshot, updates } = publisher.subscribe();
+                        let mut client = Client::default();
+                        client.apply(snapshot);
+                        clients.push((client, updates));
+                    }
+                    publisher.tick();
+                }
+                drain(&mut clients);
+                in_last_spell = clients.len();
+            }
         }
         publisher.tick();
         drain(&mut clients);
@@ -378,7 +484,10 @@ mod tests {
         let expected = |levels: Vec<Level>| -> BTreeMap<Price, Qty> {
             levels.into_iter().map(|l| (l.price, l.qty)).collect()
         };
-        for (client, _) in clients {
+        for (n, (client, _)) in clients.into_iter().enumerate() {
+            if n < in_last_spell {
+                assert!(client.heartbeats > 0, "client {n} saw no heartbeat");
+            }
             assert_eq!(client.seq, publisher.seq);
             assert_eq!(client.bids, expected(bids.clone()));
             assert_eq!(client.asks, expected(asks.clone()));

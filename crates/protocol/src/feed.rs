@@ -5,9 +5,11 @@
 //! the previous one; on a gap the client discards its state and reconnects,
 //! which starts with a fresh snapshot.
 //!
-//! A `Heartbeat` is a liveness signal for an otherwise idle feed. It repeats
-//! the latest `seq` and does not advance it, so a client that holds a different
-//! `seq` knows it missed an update.
+//! A `Heartbeat` is a liveness signal for an otherwise idle feed: the server
+//! sends one after about a second without any other message, and again after
+//! each further second of silence. It repeats the latest `seq` and does not
+//! advance it, so a client that holds a different `seq` knows it missed an
+//! update.
 //!
 //! The `events` carry the order flow: every engine event except `L2Update`,
 //! whose effect already arrives as level changes. They keep the engine's
