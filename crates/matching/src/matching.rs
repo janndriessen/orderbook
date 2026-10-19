@@ -1,6 +1,6 @@
 //! Matching of incoming limit orders against the book.
 
-use protocol::{Event, OrderId, Price, Qty, Side};
+use protocol::{Event, OrderId, OrderType, Price, Qty, Side, TimeInForce};
 
 use crate::{OrderBook, RestingOrder};
 
@@ -16,8 +16,8 @@ impl Matcher {
         Self::default()
     }
 
-    /// Matches a limit order against the opposite side, then rests any
-    /// remainder at its limit price.
+    /// Matches a good-till-canceled limit order against the opposite side,
+    /// then rests any remainder at its limit price.
     ///
     /// Trades execute at the maker's price, best price first and oldest order
     /// first within a price. The events are `Accepted`, one `Trade` per fill,
@@ -44,7 +44,10 @@ impl Matcher {
         let mut events = vec![Event::Accepted {
             order_id,
             side,
-            price,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Gtc,
+            },
             qty,
         }];
         let opposite = match side {
@@ -114,7 +117,10 @@ mod tests {
         Event::Accepted {
             order_id,
             side,
-            price,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Gtc,
+            },
             qty,
         }
     }

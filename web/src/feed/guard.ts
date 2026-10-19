@@ -28,7 +28,7 @@ const isSide = (value: unknown) => value === "buy" || value === "sell";
 
 /** Per event type: its side field, its signed integer fields, its unsigned ones. */
 const EVENTS: Record<string, [string | null, string[], string[]]> = {
-  accepted: ["side", ["price"], ["order_id", "qty"]],
+  accepted: ["side", [], ["order_id", "qty"]],
   trade: [
     "aggressor_side",
     ["price"],
@@ -38,6 +38,18 @@ const EVENTS: Record<string, [string | null, string[], string[]]> = {
   canceled: [null, [], ["order_id", "leaves_qty"]],
   l2_update: ["side", ["price"], ["qty"]],
 };
+
+function isOrderType(value: unknown): boolean {
+  if (!isDict(value)) return false;
+  if (value.type === "market") return true;
+  return (
+    value.type === "limit" &&
+    ints(value, ["price"]) &&
+    (value.time_in_force === "gtc" ||
+      value.time_in_force === "ioc" ||
+      value.time_in_force === "post_only")
+  );
+}
 
 function isEvent(item: Dict): boolean {
   const body = item.body;
@@ -50,6 +62,9 @@ function isEvent(item: Dict): boolean {
   const [side, signed, unsigned] = spec;
   return (
     (side === null || isSide(body[side])) &&
+    // Extra keys are ignored: the server is strict about what it accepts, the
+    // client lenient about what it reads.
+    (body.type !== "accepted" || isOrderType(body.order_type)) &&
     ints(body, signed) &&
     ints(body, unsigned, 0)
   );

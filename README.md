@@ -87,7 +87,7 @@ Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `cr
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
-- **Order types:** only good-till-cancel limit orders exist so far; IOC, post-only and market are planned. There is no fill-or-kill, stop or iceberg.
+- **Order types:** only good-till-cancel limit orders exist so far; IOC, post-only and market are planned (the random-walk source labels its takers IOC, and they always fill in full). There is no fill-or-kill, stop or iceberg.
 - **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Dead clients:** the server drops a vanished client once its writes, at least one per second, back up and hit the send timeout, typically within tens of seconds. Production servers also send WebSocket pings to detect them within a fixed interval.

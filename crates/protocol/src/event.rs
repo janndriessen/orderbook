@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{OrderId, Price, Qty, Side};
+use crate::{OrderId, OrderType, Price, Qty, Side};
 
 /// Something that happened in the engine as the result of a command.
 ///
@@ -12,7 +12,7 @@ use crate::{OrderId, Price, Qty, Side};
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum Event {
-    /// A new order entered the book.
+    /// An order was accepted.
     ///
     /// Carries the full order so that consumers such as the flow log need no
     /// lookup of their own.
@@ -21,8 +21,8 @@ pub enum Event {
         order_id: OrderId,
         /// Buy or sell.
         side: Side,
-        /// Limit price.
-        price: Price,
+        /// How the order is priced and how long it lives.
+        order_type: OrderType,
         /// Quantity ordered.
         qty: Qty,
     },
@@ -69,7 +69,49 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TimeInForce;
     use serde_json::json;
+
+    #[test]
+    fn accepted_has_a_fixed_wire_form() {
+        let event = Event::Accepted {
+            order_id: 7,
+            side: Side::Buy,
+            order_type: OrderType::Limit {
+                price: 100,
+                time_in_force: TimeInForce::Gtc,
+            },
+            qty: 3,
+        };
+        let expected = json!({
+            "type": "accepted",
+            "order_id": 7,
+            "side": "buy",
+            "order_type": { "type": "limit", "price": 100, "time_in_force": "gtc" },
+            "qty": 3,
+        });
+        assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
+    }
+
+    #[test]
+    fn accepted_market_order_has_no_price() {
+        let event = Event::Accepted {
+            order_id: 8,
+            side: Side::Sell,
+            order_type: OrderType::Market {},
+            qty: 2,
+        };
+        let expected = json!({
+            "type": "accepted",
+            "order_id": 8,
+            "side": "sell",
+            "order_type": { "type": "market" },
+            "qty": 2,
+        });
+        assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
+    }
 
     #[test]
     fn trade_round_trips() {

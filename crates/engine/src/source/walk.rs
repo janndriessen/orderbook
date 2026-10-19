@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use protocol::{Envelope, Event, OrderId, Price, Qty, Seq, Side, Ts};
+use protocol::{Envelope, Event, OrderId, OrderType, Price, Qty, Seq, Side, TimeInForce, Ts};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -188,7 +188,10 @@ impl RandomWalk {
             Event::Accepted {
                 order_id,
                 side,
-                price,
+                order_type: OrderType::Limit {
+                    price,
+                    time_in_force: TimeInForce::Gtc,
+                },
                 qty,
             },
         );
@@ -283,7 +286,9 @@ impl RandomWalk {
         if self.book.level_count(maker_side) < 2 {
             return self.place(side, out);
         }
-        // The taker is a marketable limit order priced at the touch.
+        // The taker is a marketable limit order priced at the touch:
+        // immediate-or-cancel, as a taker is. Its quantity never exceeds the
+        // touch, so no remainder is ever canceled.
         let total = self.book.total(maker_side, price);
         let taker_qty = if self.rng.random_range(0..SWEEP_ODDS) == 0 {
             total
@@ -297,7 +302,10 @@ impl RandomWalk {
             Event::Accepted {
                 order_id: taker_id,
                 side,
-                price,
+                order_type: OrderType::Limit {
+                    price,
+                    time_in_force: TimeInForce::Ioc,
+                },
                 qty: taker_qty,
             },
         );
@@ -349,6 +357,7 @@ mod tests {
     #[derive(Default)]
     struct Shadow {
         orders: BTreeMap<OrderId, Order>,
+        time_in_force: BTreeMap<OrderId, TimeInForce>,
         last_seq: Seq,
         last_ts: Ts,
     }
@@ -383,9 +392,17 @@ mod tests {
                 Event::Accepted {
                     order_id,
                     side,
-                    price,
+                    order_type,
                     qty,
                 } => {
+                    let OrderType::Limit {
+                        price,
+                        time_in_force,
+                    } = order_type
+                    else {
+                        panic!("the walk only places limit orders");
+                    };
+                    self.time_in_force.insert(order_id, time_in_force);
                     assert!(qty > 0);
                     let previous = self.orders.insert(order_id, Order { side, price, qty });
                     assert!(previous.is_none(), "order ids are unique");
@@ -397,6 +414,11 @@ mod tests {
                     price,
                     qty,
                 } => {
+                    assert_eq!(
+                        self.time_in_force[&taker_order_id],
+                        TimeInForce::Ioc,
+                        "takers are immediate-or-cancel"
+                    );
                     let maker = self.orders[&maker_order_id];
                     assert_eq!(price, maker.price, "trades happen at the maker's price");
                     assert_ne!(maker.side, aggressor_side);
@@ -424,6 +446,12 @@ mod tests {
                     assert_eq!(order.qty, leaves_qty);
                 }
                 Event::L2Update { side, price, qty } => {
+                    assert!(
+                        self.orders
+                            .keys()
+                            .all(|id| self.time_in_force[id] == TimeInForce::Gtc),
+                        "only good-till-canceled orders rest"
+                    );
                     assert_eq!(
                         qty,
                         self.total(side, price),

@@ -16,6 +16,15 @@ describe("parseFeedMessage", () => {
     expect(parseFeedMessage(json(beat))).toEqual(beat);
   });
 
+  it.each([
+    { type: "limit", price: 5, time_in_force: "ioc" },
+    { type: "limit", price: -5, time_in_force: "post_only" },
+    { type: "market" },
+  ] as const)("accepts an accepted order of type %j", (orderType) => {
+    const msg = update({ events: [accepted(1, orderType)] });
+    expect(parseFeedMessage(json(msg))).toEqual(msg);
+  });
+
   const withEvent = (body: unknown) =>
     json({ ...update(), events: [{ seq: 1, ts: 1, body }] });
 
@@ -35,6 +44,38 @@ describe("parseFeedMessage", () => {
       json({ ...update(), bids: [{ price: 1, qty: -1 }] }),
     ],
     ["an unknown event", withEvent({ type: "x" })],
+    [
+      "an accepted order without an order type",
+      withEvent({ ...accepted(1).body, order_type: undefined }),
+    ],
+    [
+      "an unknown order type",
+      withEvent({
+        ...accepted(1).body,
+        order_type: { type: "stop", price: 1, time_in_force: "gtc" },
+      }),
+    ],
+    [
+      "a limit order without a price",
+      withEvent({
+        ...accepted(1).body,
+        order_type: { type: "limit", time_in_force: "gtc" },
+      }),
+    ],
+    [
+      "a limit order with a fractional price",
+      withEvent({
+        ...accepted(1).body,
+        order_type: { type: "limit", price: 1.5, time_in_force: "gtc" },
+      }),
+    ],
+    [
+      "a limit order with an unknown time in force",
+      withEvent({
+        ...accepted(1).body,
+        order_type: { type: "limit", price: 1, time_in_force: "day" },
+      }),
+    ],
     ["a bad trade side", withEvent({ ...trade(1).body, aggressor_side: "up" })],
     ["a snapshot without a market", json({ ...snapshot(), market: undefined })],
     [

@@ -3,6 +3,7 @@ import type { Event } from "../protocol/Event";
 import type { FeedMessage } from "../protocol/FeedMessage";
 import type { Level } from "../protocol/Level";
 import type { MarketInfo } from "../protocol/MarketInfo";
+import type { OrderType } from "../protocol/OrderType";
 
 export const market: MarketInfo = {
   symbol: "BTC-USD",
@@ -18,12 +19,18 @@ export function envelope<T extends Event>(seq: number, body: T): Envelope<T> {
   return { seq, ts: 1_700_000_000_000_000 + seq * 1_000, body };
 }
 
-export const accepted = (seq: number) =>
+const limit: OrderType = {
+  type: "limit",
+  price: 1_000_000,
+  time_in_force: "gtc",
+};
+
+export const accepted = (seq: number, order_type: OrderType = limit) =>
   envelope(seq, {
     type: "accepted",
     order_id: seq,
     side: "buy",
-    price: 1_000_000,
+    order_type,
     qty: 500,
   });
 

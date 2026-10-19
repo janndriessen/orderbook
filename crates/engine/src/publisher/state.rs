@@ -173,7 +173,7 @@ pub fn encode(message: &FeedMessage) -> Frame {
 mod tests {
     use std::collections::BTreeMap;
 
-    use protocol::{Level, Price, Qty, Side};
+    use protocol::{Level, OrderType, Price, Qty, Side, TimeInForce};
 
     use super::*;
     use crate::app::market;
@@ -193,7 +193,10 @@ mod tests {
             Event::Accepted {
                 order_id,
                 side: Side::Buy,
-                price: 100,
+                order_type: OrderType::Limit {
+                    price: 100,
+                    time_in_force: TimeInForce::Gtc,
+                },
                 qty: 1,
             },
         )

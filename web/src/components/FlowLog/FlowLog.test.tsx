@@ -37,6 +37,33 @@ describe("FlowLog", () => {
     expect(items()[0]).toHaveTextContent("Buy 0.500 @ 100,000.0");
   });
 
+  it.each([
+    [
+      "an immediate-or-cancel limit order with an IOC tag",
+      { type: "limit", price: 1_000_000, time_in_force: "ioc" },
+      "Buy 0.500 @ 100,000.0 IOC#1",
+    ],
+    [
+      "a post-only limit order with a PO tag",
+      { type: "limit", price: 1_000_000, time_in_force: "post_only" },
+      "Buy 0.500 @ 100,000.0 PO#1",
+    ],
+    [
+      "a market order as MKT instead of a price",
+      { type: "market" },
+      "Buy 0.500 MKT#1",
+    ],
+  ] as const)("shows %s", (_name, orderType, text) => {
+    render(<FlowLog entries={logOf(accepted(1, orderType))} market={market} />);
+    expect(items()[0]).toHaveTextContent(`Accepted${text}`);
+  });
+
+  it("explains the tags in a tooltip", () => {
+    const orderType = { type: "market" } as const;
+    render(<FlowLog entries={logOf(accepted(1, orderType))} market={market} />);
+    expect(screen.getByText("MKT")).toHaveAttribute("title", "Market order");
+  });
+
   it("filters to trades and back", async () => {
     const user = userEvent.setup();
     render(<FlowLog entries={entries} market={market} />);

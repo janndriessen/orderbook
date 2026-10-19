@@ -49,6 +49,11 @@
   color: var(--color-ask);
 }
 
+.tag {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
 .ref {
   margin-inline-start: auto;
   color: var(--color-text-faint);

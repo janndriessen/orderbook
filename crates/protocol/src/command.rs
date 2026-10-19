@@ -55,6 +55,7 @@ pub enum Command {
 /// limit order without one, cannot be expressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum OrderType {
     /// Trades at its price or better.
     Limit {
@@ -73,6 +74,7 @@ pub enum OrderType {
 /// How a limit order trades on arrival and how long it rests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum TimeInForce {
     /// Good till canceled: rests until filled or canceled.
     Gtc,
