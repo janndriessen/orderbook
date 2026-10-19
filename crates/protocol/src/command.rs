@@ -66,6 +66,9 @@ pub enum OrderType {
     },
     /// Trades against the best available prices; any remainder is canceled.
     ///
+    /// A market order that trades at all is accepted; only an empty opposite
+    /// side rejects it.
+    ///
     /// An empty struct variant rather than a unit variant: serde ignores
     /// extra fields on unit variants even when unknown fields are denied.
     Market {},

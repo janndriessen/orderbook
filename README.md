@@ -26,13 +26,13 @@ The diagram shows the target design. Principles:
   <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the top right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half, with the toggle at the right end of its toolbar." src="docs/ui-layout-light.svg">
 </picture>
 
-Desktop only, in the dense style of a professional exchange order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
+Desktop only, in the dense style of a professional exchange order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The log is ready to show rejected orders; nothing emits them yet. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
 
 ## Status
 
 Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers receive JSON over WebSocket. TypeScript types are generated from the Rust protocol crate with [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
 
-- [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
+- [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel limit orders with price-time priority; IOC, post-only, market, cancel and replace are not there yet

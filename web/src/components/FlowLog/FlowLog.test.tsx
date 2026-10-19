@@ -6,6 +6,7 @@ import {
   accepted,
   canceled,
   market,
+  rejected,
   replaced,
   trade,
 } from "../../test/fixtures";
@@ -62,6 +63,26 @@ describe("FlowLog", () => {
     const orderType = { type: "market" } as const;
     render(<FlowLog entries={logOf(accepted(1, orderType))} market={market} />);
     expect(screen.getByText("MKT")).toHaveAttribute("title", "Market order");
+  });
+
+  it.each([
+    ["post_only_would_cross", "post-only would cross"],
+    ["no_liquidity", "no liquidity"],
+  ] as const)("shows a rejected order's reason %s in words", (reason, text) => {
+    render(<FlowLog entries={logOf(rejected(1, reason))} market={market} />);
+    expect(items()[0]).toHaveTextContent(`Rejected${text}#1`);
+  });
+
+  it("lists rejected orders under Orders and hides them under Trades", async () => {
+    const user = userEvent.setup();
+    const log = logOf(rejected(1, "post_only_would_cross"), trade(2));
+    render(<FlowLog entries={log} market={market} />);
+    await user.click(screen.getByRole("radio", { name: "Orders" }));
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toHaveTextContent("Rejected");
+    await user.click(screen.getByRole("radio", { name: "Trades" }));
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toHaveTextContent("Trade");
   });
 
   it("filters to trades and back", async () => {

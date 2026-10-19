@@ -16,7 +16,7 @@ mod event;
 mod feed;
 
 pub use command::{Command, OrderType, TimeInForce};
-pub use event::Event;
+pub use event::{Event, RejectReason};
 pub use feed::{FeedMessage, Level, MarketInfo};
 
 use serde::{Deserialize, Serialize};

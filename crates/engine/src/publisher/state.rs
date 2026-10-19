@@ -173,7 +173,7 @@ pub fn encode(message: &FeedMessage) -> Frame {
 mod tests {
     use std::collections::BTreeMap;
 
-    use protocol::{Level, OrderType, Price, Qty, Side, TimeInForce};
+    use protocol::{Level, OrderType, Price, Qty, RejectReason, Side, TimeInForce};
 
     use super::*;
     use crate::app::market;
@@ -215,9 +215,17 @@ mod tests {
     fn update_carries_only_changed_levels_and_flow_events() {
         let mut publisher = Publisher::new(market());
         let mut rx = publisher.subscribe().updates;
+        let rejected = env(
+            4,
+            Event::Rejected {
+                order_id: 8,
+                reason: RejectReason::PostOnlyWouldCross,
+            },
+        );
         publisher.ingest(accepted(1, 7));
         publisher.ingest(l2(2, Side::Buy, 100, 5));
         publisher.ingest(l2(3, Side::Sell, 101, 3));
+        publisher.ingest(rejected.clone());
         assert_eq!(publisher.tick(), Some(1));
 
         let FeedMessage::Update {
@@ -232,11 +240,11 @@ mod tests {
         assert_eq!((seq, bids, asks), (1, vec![lvl(100, 5)], vec![lvl(101, 3)]));
         assert_eq!(
             events,
-            vec![accepted(1, 7)],
+            vec![accepted(1, 7), rejected],
             "L2Update must not be forwarded"
         );
 
-        publisher.ingest(l2(4, Side::Buy, 100, 0));
+        publisher.ingest(l2(5, Side::Buy, 100, 0));
         assert_eq!(publisher.tick(), Some(2));
         let FeedMessage::Update { bids, asks, .. } = next_update(&mut rx) else {
             panic!("expected an update");

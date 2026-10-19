@@ -426,6 +426,7 @@ mod tests {
                     self.fill(maker_order_id, qty);
                     self.fill(taker_order_id, qty);
                 }
+                Event::Rejected { .. } => panic!("the walk never rejects an order"),
                 Event::Replaced {
                     order_id,
                     price,

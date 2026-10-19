@@ -26,6 +26,19 @@ pub enum Event {
         /// Quantity ordered.
         qty: Qty,
     },
+    /// A new order was refused.
+    ///
+    /// The book is unchanged and the order is never `Accepted`. Refusals of
+    /// cancels and replaces are not reported with this event.
+    ///
+    /// A market order that trades at all is accepted and its remainder is
+    /// canceled; only an empty opposite side rejects it.
+    Rejected {
+        /// The rejected order.
+        order_id: OrderId,
+        /// Why the order was refused.
+        reason: RejectReason,
+    },
     /// An incoming order traded against a resting one.
     Trade {
         /// The resting order that provided liquidity.
@@ -64,6 +77,17 @@ pub enum Event {
         /// New total quantity at the level; zero means the level is gone.
         qty: Qty,
     },
+}
+
+/// Why an order was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum RejectReason {
+    /// A post-only order would have traded on arrival.
+    PostOnlyWouldCross,
+    /// A market order found the opposite side of the book empty.
+    NoLiquidity,
 }
 
 #[cfg(test)]
@@ -111,6 +135,22 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&event).unwrap(), expected);
         assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
+    }
+
+    #[test]
+    fn rejected_has_a_fixed_wire_form() {
+        for (reason, wire) in [
+            (RejectReason::PostOnlyWouldCross, "post_only_would_cross"),
+            (RejectReason::NoLiquidity, "no_liquidity"),
+        ] {
+            let event = Event::Rejected {
+                order_id: 7,
+                reason,
+            };
+            let expected = json!({ "type": "rejected", "order_id": 7, "reason": wire });
+            assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+            assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
+        }
     }
 
     #[test]

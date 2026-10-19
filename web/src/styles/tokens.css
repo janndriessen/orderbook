@@ -35,6 +35,7 @@
   --color-event-trade: #f1c35b;
   --color-event-replaced: #b995f5;
   --color-event-canceled: #8fa0a8;
+  --color-event-rejected: #d98a7a;
 
   --color-status-live: var(--color-bid);
   --color-status-wait: var(--color-event-trade);

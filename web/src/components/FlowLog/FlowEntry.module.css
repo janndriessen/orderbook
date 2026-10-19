@@ -21,6 +21,10 @@
   --event-color: var(--color-event-replaced);
 }
 
+.entry[data-type="rejected"] {
+  --event-color: var(--color-event-rejected);
+}
+
 .entry[data-type="canceled"] {
   --event-color: var(--color-event-canceled);
 }

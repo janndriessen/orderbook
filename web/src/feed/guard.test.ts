@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { accepted, l2, snapshot, trade, update } from "../test/fixtures";
+import {
+  accepted,
+  l2,
+  rejected,
+  snapshot,
+  trade,
+  update,
+} from "../test/fixtures";
 import { parseFeedMessage } from "./guard";
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -25,6 +32,14 @@ describe("parseFeedMessage", () => {
     expect(parseFeedMessage(json(msg))).toEqual(msg);
   });
 
+  it.each(["post_only_would_cross", "no_liquidity"] as const)(
+    "accepts a rejected order with reason %s",
+    (reason) => {
+      const msg = update({ events: [rejected(1, reason)] });
+      expect(parseFeedMessage(json(msg))).toEqual(msg);
+    },
+  );
+
   const withEvent = (body: unknown) =>
     json({ ...update(), events: [{ seq: 1, ts: 1, body }] });
 
@@ -44,6 +59,17 @@ describe("parseFeedMessage", () => {
       json({ ...update(), bids: [{ price: 1, qty: -1 }] }),
     ],
     ["an unknown event", withEvent({ type: "x" })],
+    [
+      "a rejection with an unknown reason",
+      withEvent({ ...rejected(1, "post_only_would_cross").body, reason: "x" }),
+    ],
+    [
+      "a rejection with a fractional order id",
+      withEvent({
+        ...rejected(1, "post_only_would_cross").body,
+        order_id: 1.5,
+      }),
+    ],
     [
       "an accepted order without an order type",
       withEvent({ ...accepted(1).body, order_type: undefined }),

@@ -1,4 +1,5 @@
 import type { FeedMessage } from "../protocol/FeedMessage";
+import { isRejectReason } from "./rejectReasons";
 
 type Dict = Record<string, unknown>;
 
@@ -29,6 +30,7 @@ const isSide = (value: unknown) => value === "buy" || value === "sell";
 /** Per event type: its side field, its signed integer fields, its unsigned ones. */
 const EVENTS: Record<string, [string | null, string[], string[]]> = {
   accepted: ["side", [], ["order_id", "qty"]],
+  rejected: [null, [], ["order_id"]],
   trade: [
     "aggressor_side",
     ["price"],
@@ -65,6 +67,7 @@ function isEvent(item: Dict): boolean {
     // Extra keys are ignored: the server is strict about what it accepts, the
     // client lenient about what it reads.
     (body.type !== "accepted" || isOrderType(body.order_type)) &&
+    (body.type !== "rejected" || isRejectReason(body.reason)) &&
     ints(body, signed) &&
     ints(body, unsigned, 0)
   );

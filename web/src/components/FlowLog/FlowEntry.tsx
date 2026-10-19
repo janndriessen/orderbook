@@ -1,5 +1,6 @@
 import { memo } from "react";
 import type { LogEntry } from "../../feed/log";
+import { REJECT_REASON_LABELS } from "../../feed/rejectReasons";
 import { formatClock, formatUnits, isoTime } from "../../format/number";
 import type { MarketInfo } from "../../protocol/MarketInfo";
 import type { TimeInForce } from "../../protocol/TimeInForce";
@@ -12,6 +13,7 @@ type Props = {
 
 const LABELS = {
   accepted: "Accepted",
+  rejected: "Rejected",
   trade: "Trade",
   replaced: "Replaced",
   canceled: "Canceled",
@@ -58,6 +60,13 @@ function Detail({ entry, market }: Props) {
         </>
       );
     }
+    case "rejected":
+      return (
+        <>
+          {REJECT_REASON_LABELS[body.reason]}
+          <span className={styles.ref}>#{body.order_id}</span>
+        </>
+      );
     case "trade":
       return (
         <>

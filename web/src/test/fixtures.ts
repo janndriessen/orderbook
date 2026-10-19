@@ -4,6 +4,7 @@ import type { FeedMessage } from "../protocol/FeedMessage";
 import type { Level } from "../protocol/Level";
 import type { MarketInfo } from "../protocol/MarketInfo";
 import type { OrderType } from "../protocol/OrderType";
+import type { RejectReason } from "../protocol/RejectReason";
 
 export const market: MarketInfo = {
   symbol: "BTC-USD",
@@ -33,6 +34,9 @@ export const accepted = (seq: number, order_type: OrderType = limit) =>
     order_type,
     qty: 500,
   });
+
+export const rejected = (seq: number, reason: RejectReason) =>
+  envelope(seq, { type: "rejected", order_id: seq, reason });
 
 export const trade = (seq: number) =>
   envelope(seq, {
