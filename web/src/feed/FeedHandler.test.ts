@@ -3,7 +3,10 @@ import { accepted, level, snapshot, trade, update } from "../test/fixtures";
 import {
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
+  CONNECT_TIMEOUT_MS,
   FeedHandler,
+  HEARTBEAT_INTERVAL_MS,
+  SILENCE_TIMEOUT_MS,
   type Transport,
 } from "./FeedHandler";
 
@@ -116,6 +119,99 @@ describe("FeedHandler", () => {
     expect(sockets).toHaveLength(1);
     expect(sockets[0]?.closed).toBe(false);
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  describe("liveness watchdog", () => {
+    const beat = wire({ type: "heartbeat", seq: 1 });
+
+    it("gives a socket that never sent anything the connect window", () => {
+      const { handler, sockets, last, waitForReconnect } = setup();
+      handler.start();
+      const first = last();
+      vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1);
+      expect(first.closed).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(first.closed).toBe(true);
+      expect(handler.getState().status).toBe("connecting");
+      waitForReconnect();
+      expect(sockets).toHaveLength(2);
+    });
+
+    it("reports reconnecting when a live feed goes silent", () => {
+      const { handler, last } = setup();
+      handler.start();
+      last().send(wire(snapshot()));
+      vi.advanceTimersByTime(SILENCE_TIMEOUT_MS - 1);
+      expect(handler.getState().status).toBe("live");
+      vi.advanceTimersByTime(1);
+      expect(handler.getState()).toMatchObject({
+        status: "reconnecting",
+        book: null,
+      });
+    });
+
+    it("stays alive while a message arrives every heartbeat interval", () => {
+      const { handler, sockets, last } = setup();
+      handler.start();
+      last().send(wire(snapshot()));
+      for (let i = 0; i < 10; i++) {
+        vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+        last().send(beat);
+      }
+      expect(handler.getState().status).toBe("live");
+      expect(sockets).toHaveLength(1);
+    });
+
+    it("tolerates a heartbeat arriving three intervals late", () => {
+      const { handler, sockets, last } = setup();
+      handler.start();
+      last().send(wire(snapshot()));
+      vi.advanceTimersByTime(3 * HEARTBEAT_INTERVAL_MS);
+      last().send(beat);
+      expect(handler.getState().status).toBe("live");
+      expect(sockets).toHaveLength(1);
+    });
+
+    it("leaves no pending timer after stop", () => {
+      const { handler, sockets, last } = setup();
+      handler.start();
+      last().send(wire(snapshot()));
+      handler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(SILENCE_TIMEOUT_MS * 10);
+      expect(sockets).toHaveLength(1);
+    });
+
+    it("ignores a stale socket's late message for the new timer", () => {
+      const { handler, sockets, last, waitForReconnect } = setup();
+      handler.start();
+      const stale = last();
+      stale.drop();
+      waitForReconnect();
+      expect(sockets).toHaveLength(2);
+      vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1);
+      stale.send(beat);
+      vi.advanceTimersByTime(1);
+      expect(last().closed).toBe(true);
+    });
+
+    it("arms the reopened socket again after a reconnect", () => {
+      const { handler, sockets, last, waitForReconnect } = setup();
+      handler.start();
+      last().drop();
+      waitForReconnect();
+      expect(sockets).toHaveLength(2);
+      vi.advanceTimersByTime(CONNECT_TIMEOUT_MS);
+      expect(sockets[1]?.closed).toBe(true);
+    });
+
+    it("leaves only the backoff timer pending after a malformed message", () => {
+      const { handler, last } = setup();
+      handler.start();
+      last().send(wire(snapshot()));
+      last().send("not json");
+      expect(vi.getTimerCount()).toBe(1);
+    });
   });
 
   it("applies updates in sequence and grows the log newest first", () => {

@@ -36,6 +36,24 @@ export type FeedHandlerOptions = {
 export const BACKOFF_BASE_MS = 250;
 export const BACKOFF_CAP_MS = 10_000;
 
+/**
+ * The server sends a heartbeat after this much silence; keep in step with
+ * `HEARTBEAT_INTERVAL` in `crates/engine/src/publisher/state.rs`.
+ */
+export const HEARTBEAT_INTERVAL_MS = 1_000;
+/**
+ * Silence that marks an established connection as dead: three missed
+ * heartbeats plus half an interval of slack for tick phase and latency, which
+ * a healthy connection never reaches.
+ */
+export const SILENCE_TIMEOUT_MS =
+  3 * HEARTBEAT_INTERVAL_MS + HEARTBEAT_INTERVAL_MS / 2;
+/**
+ * Time a new socket gets to deliver its first message (handshake plus
+ * snapshot), so a slow link still connects while a hung attempt is caught.
+ */
+export const CONNECT_TIMEOUT_MS = 10_000;
+
 const INITIAL: FeedState = {
   status: "connecting",
   book: null,
@@ -54,7 +72,9 @@ export const webSocketTransport: Transport = (url, { onMessage, onClose }) => {
  * Maintains a local copy of the book from the market-data feed, the way an
  * exchange client's feed handler does (not a DOM event callback): it applies
  * the initial snapshot and each sequenced update, and when it sees a sequence
- * gap, a malformed message or a closed socket it throws the local book away
+ * gap, a malformed message, a closed socket or a silent one (no message, not
+ * even a heartbeat, for `SILENCE_TIMEOUT_MS`, or none at all for
+ * `CONNECT_TIMEOUT_MS` after opening) it throws the local book away
  * and reconnects with capped, jittered exponential backoff. A fresh connection
  * always starts with a snapshot, so recovery needs no replay logic.
  *
@@ -66,6 +86,7 @@ export class FeedHandler {
   #listeners = new Set<() => void>();
   #connection: Connection | null = null;
   #timer: ReturnType<typeof setTimeout> | null = null;
+  #watchdog: ReturnType<typeof setTimeout> | null = null;
   #attempt = 0;
   #everLive = false;
   #running = false;
@@ -110,13 +131,22 @@ export class FeedHandler {
   #open(): void {
     const connection: Connection = this.#transport(this.#url, {
       onMessage: (data) => {
-        if (this.#connection === connection) this.#receive(data);
+        if (this.#connection !== connection) return;
+        this.#arm(SILENCE_TIMEOUT_MS);
+        this.#receive(data);
       },
       onClose: () => {
         if (this.#connection === connection) this.#recover();
       },
     });
     this.#connection = connection;
+    this.#arm(CONNECT_TIMEOUT_MS);
+  }
+
+  /** (Re)starts the watchdog of the current connection with `timeout`. */
+  #arm(timeout: number): void {
+    if (this.#watchdog !== null) clearTimeout(this.#watchdog);
+    this.#watchdog = setTimeout(() => this.#recover(), timeout);
   }
 
   #drop(): void {
@@ -126,6 +156,8 @@ export class FeedHandler {
     connection?.close();
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;
+    if (this.#watchdog !== null) clearTimeout(this.#watchdog);
+    this.#watchdog = null;
   }
 
   #receive(data: unknown): void {

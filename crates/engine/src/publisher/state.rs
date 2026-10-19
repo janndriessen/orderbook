@@ -22,7 +22,8 @@ pub type Frame = Utf8Bytes;
 pub const RECENT_EVENTS: usize = 200;
 
 /// Silence after which an idle feed sends a heartbeat, and the gap between
-/// further ones.
+/// further ones. Clients time out after about 3.5 times this (see
+/// `web/src/feed/FeedHandler.ts`), so change both together.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Idle ticks that make up one [`HEARTBEAT_INTERVAL`]. Counting ticks keeps
