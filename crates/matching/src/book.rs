@@ -1,0 +1,230 @@
+//! The order book: resting orders grouped into price levels per side.
+
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+use protocol::{OrderId, Price, Qty, Side};
+
+/// An order resting in the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestingOrder {
+    /// Identifier of the order.
+    pub order_id: OrderId,
+    /// Side of the book it rests on.
+    pub side: Side,
+    /// Limit price in ticks.
+    pub price: Price,
+    /// Remaining quantity in lots.
+    pub qty: Qty,
+}
+
+/// All resting orders at one price: a FIFO queue and its total quantity.
+#[derive(Debug, Default)]
+pub struct PriceLevel {
+    queue: VecDeque<OrderId>,
+    total: Qty,
+}
+
+impl PriceLevel {
+    /// Order ids in arrival order, oldest first.
+    pub fn orders(&self) -> impl Iterator<Item = OrderId> + '_ {
+        self.queue.iter().copied()
+    }
+
+    /// Sum of the remaining quantity of every order in the level.
+    pub fn total(&self) -> Qty {
+        self.total
+    }
+}
+
+/// Why the book refused an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BookError {
+    /// An order with this id is already resting in the book.
+    #[error("order {0} is already resting in the book")]
+    DuplicateOrderId(OrderId),
+}
+
+/// Both sides of the book.
+///
+/// Levels are kept in sorted maps, so iteration order is defined by price.
+/// The order index is a `HashMap` that is only ever looked up by id, never
+/// iterated, so its unspecified order cannot affect determinism.
+#[derive(Debug, Default)]
+pub struct OrderBook {
+    bids: BTreeMap<Price, PriceLevel>,
+    asks: BTreeMap<Price, PriceLevel>,
+    orders: HashMap<OrderId, RestingOrder>,
+}
+
+impl OrderBook {
+    /// An empty book.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rests `order` at the back of its price level.
+    ///
+    /// Fails, leaving the book unchanged, if the id is already resting.
+    pub fn add(&mut self, order: RestingOrder) -> Result<(), BookError> {
+        if self.orders.contains_key(&order.order_id) {
+            return Err(BookError::DuplicateOrderId(order.order_id));
+        }
+        let level = self.side_mut(order.side).entry(order.price).or_default();
+        level.queue.push_back(order.order_id);
+        level.total = level
+            .total
+            .checked_add(order.qty)
+            .expect("level totals stay below 2^53, the protocol's quantity bound");
+        self.orders.insert(order.order_id, order);
+        Ok(())
+    }
+
+    /// Removes a resting order, or returns `None` if the id is unknown.
+    ///
+    /// Scans the order's level for its place in the queue, so the cost is
+    /// linear in that level's length. A level left empty is removed.
+    pub fn cancel(&mut self, order_id: OrderId) -> Option<RestingOrder> {
+        let order = self.orders.remove(&order_id)?;
+        let levels = self.side_mut(order.side);
+        let level = levels
+            .get_mut(&order.price)
+            .expect("every indexed order rests in its side's level at its price");
+        let pos = level
+            .queue
+            .iter()
+            .position(|&id| id == order_id)
+            .expect("every indexed order is queued in its level");
+        level.queue.remove(pos);
+        level.total = level
+            .total
+            .checked_sub(order.qty)
+            .expect("a level's total includes every order queued in it");
+        if level.queue.is_empty() {
+            levels.remove(&order.price);
+        }
+        Some(order)
+    }
+
+    /// Highest price with a resting bid.
+    pub fn best_bid(&self) -> Option<Price> {
+        self.bids.keys().next_back().copied()
+    }
+
+    /// Lowest price with a resting ask.
+    pub fn best_ask(&self) -> Option<Price> {
+        self.asks.keys().next().copied()
+    }
+
+    /// The level at `price` on `side`, if any order rests there.
+    pub fn level(&self, side: Side, price: Price) -> Option<&PriceLevel> {
+        match side {
+            Side::Buy => self.bids.get(&price),
+            Side::Sell => self.asks.get(&price),
+        }
+    }
+
+    fn side_mut(&mut self, side: Side) -> &mut BTreeMap<Price, PriceLevel> {
+        match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn order(order_id: OrderId, side: Side, price: Price, qty: Qty) -> RestingOrder {
+        RestingOrder {
+            order_id,
+            side,
+            price,
+            qty,
+        }
+    }
+
+    fn queue_of(book: &OrderBook, side: Side, price: Price) -> Vec<OrderId> {
+        book.level(side, price)
+            .map_or(vec![], |l| l.orders().collect())
+    }
+
+    /// Three bids at 100 (ids 1, 2, 3; qty 10, 20, 30).
+    fn book_with_queue() -> OrderBook {
+        let mut book = OrderBook::new();
+        for (id, qty) in [(1, 10), (2, 20), (3, 30)] {
+            book.add(order(id, Side::Buy, 100, qty)).unwrap();
+        }
+        book
+    }
+
+    #[test]
+    fn level_is_fifo_in_arrival_order() {
+        let book = book_with_queue();
+        assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
+    }
+
+    #[test]
+    fn best_prices_on_both_sides() {
+        let mut book = OrderBook::new();
+        assert_eq!((book.best_bid(), book.best_ask()), (None, None));
+        for (id, side, price) in [
+            (1, Side::Buy, 98),
+            (2, Side::Buy, 99),
+            (3, Side::Sell, 102),
+            (4, Side::Sell, 101),
+        ] {
+            book.add(order(id, side, price, 1)).unwrap();
+        }
+        assert_eq!((book.best_bid(), book.best_ask()), (Some(99), Some(101)));
+    }
+
+    #[test]
+    fn cancel_front_middle_and_back() {
+        for (id, rest) in [(1, [2, 3]), (2, [1, 3]), (3, [1, 2])] {
+            let mut book = book_with_queue();
+            assert_eq!(book.cancel(id).map(|o| o.order_id), Some(id));
+            assert_eq!(queue_of(&book, Side::Buy, 100), rest);
+            assert_eq!(book.cancel(id), None);
+        }
+    }
+
+    #[test]
+    fn emptied_level_disappears() {
+        let mut book = OrderBook::new();
+        book.add(order(1, Side::Sell, 101, 5)).unwrap();
+        book.add(order(2, Side::Sell, 102, 5)).unwrap();
+        book.cancel(1);
+        assert!(book.level(Side::Sell, 101).is_none());
+        assert_eq!(book.best_ask(), Some(102));
+    }
+
+    #[test]
+    fn level_total_tracks_adds_and_cancels() {
+        let mut book = book_with_queue();
+        let total = |b: &OrderBook| b.level(Side::Buy, 100).map(PriceLevel::total);
+        assert_eq!(total(&book), Some(60));
+        book.cancel(2);
+        assert_eq!(total(&book), Some(40));
+        book.add(order(4, Side::Buy, 100, 5)).unwrap();
+        assert_eq!(total(&book), Some(45));
+    }
+
+    #[test]
+    fn cancel_unknown_id_returns_none() {
+        let mut book = book_with_queue();
+        assert_eq!(book.cancel(99), None);
+        assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
+    }
+
+    #[test]
+    fn duplicate_id_is_rejected_and_book_unchanged() {
+        let mut book = book_with_queue();
+        let result = book.add(order(2, Side::Sell, 105, 7));
+        assert_eq!(result, Err(BookError::DuplicateOrderId(2)));
+        assert_eq!(book.best_ask(), None);
+        assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(60));
+        assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
+        assert_eq!(book.cancel(2), Some(order(2, Side::Buy, 100, 20)));
+    }
+}

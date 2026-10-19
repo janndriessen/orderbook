@@ -15,7 +15,8 @@ Don't add tooling, frameworks, or packages beyond the layout and commands below 
 ```
 crates/
   protocol/     shared message format: commands in, events out, market-data feed; source of the TS types
-  engine/       gateway (validate + sequence), book, matching, publisher
+  matching/     order book and matching; depends on nothing but protocol
+  engine/       gateway (validate + sequence), publisher
   adapters/     one crate per external source, translating into the protocol
   replayer/     plays recorded input: real-time, accelerated, step
   generator/    synthetic and fuzz order flow

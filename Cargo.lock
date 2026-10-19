@@ -897,6 +897,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "matching"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "thiserror",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

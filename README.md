@@ -35,8 +35,10 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
+- [x] `matching` crate with the order book only: sorted price levels, FIFO queues, add and cancel, no matching yet
 - [ ] Matching engine and hand-written scenarios
-- [ ] Fuzz generator and invariant checks
+- [ ] Fuzz generator, invariant checks and benchmarks
+  - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
 - [ ] Hyperliquid adapter and replayer
 - [ ] Deployment to a small Hetzner server
 
@@ -68,12 +70,13 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 
 ```
 crates/protocol/   shared message format; source of the TypeScript types
+crates/matching/   order book: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
 crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 docs/              diagrams
 ```
 
-Planned, not yet present: the gateway and matching engine in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
+Planned, not yet present: the gateway in `crates/engine`, matching in `crates/matching`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
@@ -83,6 +86,7 @@ Planned, not yet present: the gateway and matching engine in `crates/engine`, `c
 - **Gateways:** one simple gateway with stateless checks only. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients.
+- **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
 - **Order types:** limit (GTC, IOC, post-only) and market only; no fill-or-kill, stop or iceberg orders.
 - **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.

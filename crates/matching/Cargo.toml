@@ -1,0 +1,14 @@
+[package]
+name = "matching"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Order book and matching: pure in-memory logic with no I/O."
+
+[dependencies]
+protocol.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
