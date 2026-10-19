@@ -36,6 +36,18 @@ impl PriceLevel {
     }
 }
 
+/// A fill of the front order at the best price, as reported by
+/// [`OrderBook::fill_best`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fill {
+    /// The resting (maker) order that was filled.
+    pub maker_order_id: OrderId,
+    /// The maker's price, which is the trade price.
+    pub price: Price,
+    /// Quantity filled.
+    pub qty: Qty,
+}
+
 /// Why the book refused an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BookError {
@@ -65,7 +77,12 @@ impl OrderBook {
     /// Rests `order` at the back of its price level.
     ///
     /// Fails, leaving the book unchanged, if the id is already resting.
+    ///
+    /// # Panics
+    ///
+    /// If `order.qty` is zero; the gateway's size check rules that out.
     pub fn add(&mut self, order: RestingOrder) -> Result<(), BookError> {
+        assert!(order.qty > 0, "resting orders have a positive quantity");
         if self.orders.contains_key(&order.order_id) {
             return Err(BookError::DuplicateOrderId(order.order_id));
         }
@@ -115,11 +132,64 @@ impl OrderBook {
         self.asks.keys().next().copied()
     }
 
+    /// Fills up to `max_qty` of the front order at the best price on `side`,
+    /// or returns `None` if the side is empty.
+    ///
+    /// The fill is `min(max_qty, front order's remaining quantity)`. A partly
+    /// filled order keeps its place at the front. A fully filled one leaves
+    /// the queue and the index, and an emptied level is removed. This is the
+    /// only way to reduce a resting order, so fills follow price-time
+    /// priority by construction.
+    ///
+    /// # Panics
+    ///
+    /// If `max_qty` is zero.
+    pub fn fill_best(&mut self, side: Side, max_qty: Qty) -> Option<Fill> {
+        assert!(max_qty > 0, "a fill has a positive quantity");
+        let price = self.best_price(side)?;
+        let id = *self.level(side, price)?.queue.front()?;
+        let maker = *self.orders.get(&id).expect("every queued order is indexed");
+        let qty = max_qty.min(maker.qty);
+        let remaining = maker.qty - qty;
+        let levels = self.side_mut(side);
+        let level = levels
+            .get_mut(&maker.price)
+            .expect("the best order rests in its side's level at its price");
+        level.total = level
+            .total
+            .checked_sub(qty)
+            .expect("a level's total includes its front order");
+        if remaining == 0 {
+            level.queue.pop_front();
+            if level.queue.is_empty() {
+                levels.remove(&maker.price);
+            }
+            self.orders.remove(&maker.order_id);
+        } else {
+            self.orders
+                .get_mut(&maker.order_id)
+                .expect("the best order is indexed")
+                .qty = remaining;
+        }
+        Some(Fill {
+            maker_order_id: maker.order_id,
+            price: maker.price,
+            qty,
+        })
+    }
+
     /// The level at `price` on `side`, if any order rests there.
     pub fn level(&self, side: Side, price: Price) -> Option<&PriceLevel> {
         match side {
             Side::Buy => self.bids.get(&price),
             Side::Sell => self.asks.get(&price),
+        }
+    }
+
+    fn best_price(&self, side: Side) -> Option<Price> {
+        match side {
+            Side::Buy => self.best_bid(),
+            Side::Sell => self.best_ask(),
         }
     }
 
@@ -226,5 +296,85 @@ mod tests {
         assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(60));
         assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
         assert_eq!(book.cancel(2), Some(order(2, Side::Buy, 100, 20)));
+    }
+
+    fn fill(maker_order_id: OrderId, price: Price, qty: Qty) -> Option<Fill> {
+        Some(Fill {
+            maker_order_id,
+            price,
+            qty,
+        })
+    }
+
+    #[test]
+    fn partial_fill_keeps_the_front_position() {
+        let mut book = book_with_queue();
+        assert_eq!(book.fill_best(Side::Buy, 4), fill(1, 100, 4));
+        assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(56));
+        assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
+        assert_eq!(book.fill_best(Side::Buy, 100), fill(1, 100, 6));
+    }
+
+    #[test]
+    fn sell_side_partial_fill_reduces_the_best_ask() {
+        let mut book = OrderBook::new();
+        book.add(order(1, Side::Sell, 102, 5)).unwrap();
+        book.add(order(2, Side::Sell, 101, 8)).unwrap();
+        assert_eq!(book.fill_best(Side::Sell, 3), fill(2, 101, 3));
+        assert_eq!(book.level(Side::Sell, 101).map(PriceLevel::total), Some(5));
+        assert_eq!(book.level(Side::Sell, 102).map(PriceLevel::total), Some(5));
+    }
+
+    #[test]
+    fn fill_is_capped_at_the_front_orders_remaining_quantity() {
+        let mut book = book_with_queue();
+        assert_eq!(book.fill_best(Side::Buy, 25), fill(1, 100, 10));
+        assert_eq!(queue_of(&book, Side::Buy, 100), [2, 3]);
+        assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(50));
+        assert_eq!(book.cancel(1), None);
+    }
+
+    #[test]
+    fn filling_the_last_order_removes_the_level() {
+        let mut book = OrderBook::new();
+        book.add(order(1, Side::Buy, 100, 5)).unwrap();
+        book.add(order(2, Side::Buy, 99, 5)).unwrap();
+        book.fill_best(Side::Buy, 5);
+        assert!(book.level(Side::Buy, 100).is_none());
+        assert_eq!(book.best_bid(), Some(99));
+        assert_eq!(book.cancel(1), None);
+    }
+
+    #[test]
+    fn fills_use_the_best_price_of_each_side() {
+        let mut book = OrderBook::new();
+        for (id, side, price) in [
+            (1, Side::Buy, 98),
+            (2, Side::Buy, 99),
+            (3, Side::Sell, 102),
+            (4, Side::Sell, 101),
+        ] {
+            book.add(order(id, side, price, 1)).unwrap();
+        }
+        assert_eq!(book.fill_best(Side::Buy, 1), fill(2, 99, 1));
+        assert_eq!(book.fill_best(Side::Sell, 1), fill(4, 101, 1));
+    }
+
+    #[test]
+    fn filling_an_empty_side_returns_none() {
+        let mut book = book_with_queue();
+        assert_eq!(book.fill_best(Side::Sell, 1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a fill has a positive quantity")]
+    fn zero_max_qty_fill_panics() {
+        book_with_queue().fill_best(Side::Buy, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "resting orders have a positive quantity")]
+    fn adding_a_zero_qty_order_panics() {
+        let _ = OrderBook::new().add(order(1, Side::Buy, 100, 0));
     }
 }

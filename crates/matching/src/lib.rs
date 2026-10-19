@@ -7,4 +7,4 @@
 
 mod book;
 
-pub use book::{BookError, OrderBook, PriceLevel, RestingOrder};
+pub use book::{BookError, Fill, OrderBook, PriceLevel, RestingOrder};

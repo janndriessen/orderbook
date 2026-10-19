@@ -35,7 +35,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
-- [x] `matching` crate with the order book only: sorted price levels, FIFO queues, add and cancel, no matching yet
+- [x] `matching` crate with the order book only: sorted price levels, FIFO queues, add, cancel and fill at the front of the best level; no matching yet
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
