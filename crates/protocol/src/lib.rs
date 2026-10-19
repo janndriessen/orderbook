@@ -7,12 +7,15 @@
 //! floating-point rounding can creep into matching. Integer values stay below
 //! 2^53 so that JavaScript clients represent them exactly.
 //!
-//! TypeScript definitions for the web client are generated from these types
-//! into `web/src/protocol/` whenever the crate's tests run.
+//! TypeScript definitions for the types the web client reads are generated
+//! into `web/src/protocol/` whenever the crate's tests run. Commands are never
+//! sent by the web client and have none.
 
+mod command;
 mod event;
 mod feed;
 
+pub use command::{Command, OrderType, TimeInForce};
 pub use event::Event;
 pub use feed::{FeedMessage, Level, MarketInfo};
 

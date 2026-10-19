@@ -94,9 +94,9 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 
 ## Protocol and generated types
 
-- Types in `crates/protocol` derive `serde` and `ts_rs::TS`. JSON enums are internally tagged (`{"type": "...", ...}`), fields `snake_case`.
+- Types in `crates/protocol` derive `serde`; types the web client reads also derive `ts_rs::TS`, and types it never receives (commands) do not. JSON enums are internally tagged (`{"type": "...", ...}`), fields `snake_case`.
 - `u64`/`i64` fields are exported to TypeScript as `number`. Values stay below 2^53, which is documented on the types.
-- TS types are generated into `web/src/protocol/` by `cargo test -p protocol` and committed. Never hand-edit them; CI fails if they are stale.
+- TS types, for the types that derive `TS`, are generated into `web/src/protocol/` by `cargo test -p protocol` and committed. Never hand-edit them; CI fails if they are stale.
 - Names follow established trading terminology (order types, time in force, execution events), not invented terms.
 
 ## Web
