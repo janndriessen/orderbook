@@ -9,7 +9,9 @@ use crate::{OrderId, OrderType, Price, Qty, Side};
 /// One command can produce several events: an aggressive order produces
 /// `Accepted`, one `Trade` per matched maker, `Canceled` if an
 /// immediate-or-cancel or market remainder is left, and the resulting
-/// `L2Update`s.
+/// `L2Update`s. A replace produces `Replaced`, one `Trade` per matched maker
+/// if the new price crosses, and the resulting `L2Update`s; it is never
+/// `Accepted` again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -53,11 +55,14 @@ pub enum Event {
         /// Why the request was refused.
         reason: CancelRejectReason,
     },
-    /// An incoming order traded against a resting one.
+    /// An order traded against a resting one.
+    ///
+    /// The taker is the incoming order, or a replaced order whose new price
+    /// crossed the book.
     Trade {
         /// The resting order that provided liquidity.
         maker_order_id: OrderId,
-        /// The incoming order that took liquidity.
+        /// The order that took liquidity.
         taker_order_id: OrderId,
         /// Side of the taker, which initiated the trade.
         aggressor_side: Side,
@@ -72,7 +77,9 @@ pub enum Event {
         order_id: OrderId,
         /// Price after the change.
         price: Price,
-        /// Open quantity after the change.
+        /// Quantity requested by the replace. A replace that crosses the book
+        /// reports its fills as `Trade`s, so the open quantity can end up
+        /// smaller.
         qty: Qty,
     },
     /// An order, or its unfilled remainder, was canceled.

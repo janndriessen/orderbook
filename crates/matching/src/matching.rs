@@ -1,4 +1,5 @@
-//! Matching of incoming orders against the book, and cancels of resting ones.
+//! Matching of incoming orders against the book, and cancels and replaces of
+//! resting ones.
 
 use protocol::{
     CancelRejectReason, CancelRequest, Command, Event, OrderId, OrderType, Price, Qty,
@@ -7,7 +8,8 @@ use protocol::{
 
 use crate::{OrderBook, RestingOrder};
 
-/// An order book plus the matching of incoming orders and cancels.
+/// An order book plus the matching of incoming orders and the cancel and
+/// replace of resting ones.
 #[derive(Debug, Default)]
 pub struct Matcher {
     book: OrderBook,
@@ -21,9 +23,10 @@ impl Matcher {
 
     /// Runs one command and returns the events it produced.
     ///
-    /// The engine's input: each command goes to the method of the same name,
-    /// with the same events and the same panics on values the gateway rules
-    /// out.
+    /// The engine's input: `Cancel` and `Replace` go to the method of the same
+    /// name, and `Place` goes to `place_limit` or `place_market` by order
+    /// type. The events and the panics on values the gateway rules out are
+    /// those of that method.
     pub fn apply(&mut self, command: Command) -> Vec<Event> {
         match command {
             Command::Place {

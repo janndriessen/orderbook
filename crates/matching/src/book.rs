@@ -179,9 +179,10 @@ impl OrderBook {
     ///
     /// The fill is `min(max_qty, front order's remaining quantity)`. A partly
     /// filled order keeps its place at the front. A fully filled one leaves
-    /// the queue and the index, and an emptied level is removed. This is the
-    /// only way to reduce a resting order, so fills follow price-time
-    /// priority by construction.
+    /// the queue and the index, and an emptied level is removed. Trades only
+    /// ever take the front of the best level, so they follow price-time
+    /// priority by construction; [`OrderBook::reduce`] lowers a resting order
+    /// without trading.
     ///
     /// # Panics
     ///
