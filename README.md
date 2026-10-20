@@ -37,8 +37,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
-- [x] Random-walk order flow drives the `matching` crate inside the service, on the source thread
-- [ ] Matching engine on its own thread behind a gateway that sequences commands
+- [x] Random-walk order flow on the source thread drives the `matching` crate inside the service, which runs alone on its own engine thread behind a bounded command queue
+- [ ] Gateway that validates and sequences commands in front of the engine thread
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
 - [ ] Hyperliquid adapter and replayer
@@ -73,13 +73,13 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 ```
 crates/protocol/   shared message format; source of the TypeScript types
 crates/matching/   order book, limit- and market-order matching, cancel and replace: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
-crates/engine/     order book service: random-walk order flow, matcher, publisher, WebSocket feed
+crates/engine/     order book service: random-walk order flow, matcher on its own thread, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
 ```
 
-Planned, not yet present: the gateway and the dedicated engine thread in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness` and `data/` (recorded sessions, gitignored).
+Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness` and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
@@ -93,7 +93,7 @@ Planned, not yet present: the gateway and the dedicated engine thread in `crates
 - **Price protection:** market orders have no protection, so on a thin book one can sweep far through the levels. Production venues add price bands or protection limits.
 - **Order types:** market orders trade immediately at any price, cancel any remainder and are rejected on an empty opposite side. Limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced). A replace that changes the price or grows the quantity is a cancel followed by a new arrival: it loses time priority, and if the new price crosses it trades, except that a post-only order is refused instead. The `qty` of a replace is the new open quantity, not the total order size including fills; production venues differ on this. There is no fill-or-kill, stop or iceberg.
 - **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids.
-- **Order flow:** a seeded random walk generates the commands: GTC limits around the touch, cancels, replaces and IOC takers that never exceed the touch, which the real matcher turns into events. It therefore never produces a `Canceled` IOC remainder or a reject. The matcher currently runs on the source thread.
+- **Order flow:** a seeded random walk generates the commands: GTC limits around the touch, cancels, replaces and IOC takers that never exceed the touch, which the real matcher turns into events. It therefore never produces a `Canceled` IOC remainder or a reject.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Dead clients:** the server drops a vanished client once its writes, at least one per second, back up and hit the send timeout, typically within tens of seconds. Production servers also send WebSocket pings to detect them within a fixed interval.
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.

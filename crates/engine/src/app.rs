@@ -1,4 +1,4 @@
-//! Wires the source, the publisher and the WebSocket server together.
+//! Wires the source, the engine, the publisher and the WebSocket server together.
 
 use std::io;
 
@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::source::{self, RandomWalk};
-use crate::{publisher, ws};
+use crate::{matcher, publisher, ws};
 
 /// The market the service publishes.
 pub fn market() -> MarketInfo {
@@ -22,12 +22,12 @@ pub fn market() -> MarketInfo {
 
 /// Runs the service on `listener` until `shutdown` fires or a component dies.
 ///
-/// Starts the source thread (random-walk order flow driving the matcher), the
-/// publisher task and the WebSocket server, and waits for all of them to stop.
-/// Without a `seed` one is derived from the clock.
+/// Starts the source thread (random-walk order flow), the engine thread (the
+/// matcher), the publisher task and the WebSocket server, and waits for all of
+/// them to stop. Without a `seed` one is derived from the clock.
 ///
-/// Returns an error if the server failed or if the publisher or the source
-/// panicked, so a supervisor can restart the process.
+/// Returns an error if the server failed or if the publisher, the engine or
+/// the source panicked, so a supervisor can restart the process.
 pub async fn run(
     listener: TcpListener,
     seed: Option<u64>,
@@ -36,9 +36,13 @@ pub async fn run(
     let addr = listener.local_addr()?;
     let start_ts = source::now_ts();
     let seed = seed.unwrap_or(start_ts);
-    let (queue, events) = mpsc::channel(source::QUEUE_CAPACITY);
+    let (command_queue, commands) = mpsc::channel(source::COMMAND_QUEUE_CAPACITY);
+    let (event_queue, events) = mpsc::channel(matcher::EVENT_QUEUE_CAPACITY);
     // Fallible steps come first so that an early return leaves nothing running.
-    let source = source::spawn(RandomWalk::new(seed, start_ts), queue)?;
+    // If the source fails to start, the engine's command queue closes with the
+    // dropped sender and the engine thread exits on its own.
+    let engine = matcher::spawn(commands, event_queue)?;
+    let source = source::spawn(RandomWalk::new(seed, start_ts), command_queue)?;
     let (handle, publisher) = publisher::spawn(market(), events, shutdown.clone());
 
     // The same seed gives the same command stream; timestamps start at launch time.
@@ -53,17 +57,20 @@ pub async fn run(
         error!(%err, "publisher task failed");
         failed = true;
     }
-    // The publisher dropped the queue's receiver, so the source thread exits
-    // on its next send; joining blocks briefly, so keep it off the runtime.
-    match tokio::task::spawn_blocking(move || source.join()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => {
-            error!("source thread panicked");
-            failed = true;
-        }
-        Err(err) => {
-            error!(%err, "could not join source thread");
-            failed = true;
+    // The publisher dropped the event receiver, so the engine thread exits on
+    // its next send, which drops the command receiver and stops the source in
+    // turn. Joining blocks briefly, so keep it off the runtime.
+    for (name, thread) in [("engine", engine), ("source", source)] {
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                error!(thread = name, "thread panicked");
+                failed = true;
+            }
+            Err(err) => {
+                error!(%err, thread = name, "could not join thread");
+                failed = true;
+            }
         }
     }
     served?;
