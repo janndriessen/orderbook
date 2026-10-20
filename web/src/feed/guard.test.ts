@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   accepted,
+  cancelRejected,
   l2,
   rejected,
   snapshot,
@@ -40,6 +41,14 @@ describe("parseFeedMessage", () => {
     },
   );
 
+  it.each(["unknown_order", "post_only_would_cross"] as const)(
+    "accepts a cancel rejection with reason %s",
+    (reason) => {
+      const msg = update({ events: [cancelRejected(1, reason)] });
+      expect(parseFeedMessage(json(msg))).toEqual(msg);
+    },
+  );
+
   const withEvent = (body: unknown) =>
     json({ ...update(), events: [{ seq: 1, ts: 1, body }] });
 
@@ -62,6 +71,28 @@ describe("parseFeedMessage", () => {
     [
       "a rejection with an unknown reason",
       withEvent({ ...rejected(1, "post_only_would_cross").body, reason: "x" }),
+    ],
+    [
+      "a cancel rejection with an unknown reason",
+      withEvent({ ...cancelRejected(1, "unknown_order").body, reason: "x" }),
+    ],
+    [
+      "a cancel rejection with a new-order reason",
+      withEvent({
+        ...cancelRejected(1, "unknown_order").body,
+        reason: "no_liquidity",
+      }),
+    ],
+    [
+      "a cancel rejection with an unknown request",
+      withEvent({
+        ...cancelRejected(1, "unknown_order").body,
+        response_to: "x",
+      }),
+    ],
+    [
+      "a cancel rejection with a fractional order id",
+      withEvent({ ...cancelRejected(1, "unknown_order").body, order_id: 1.5 }),
     ],
     [
       "a rejection with a fractional order id",

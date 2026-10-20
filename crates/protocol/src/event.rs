@@ -30,8 +30,8 @@ pub enum Event {
     },
     /// A new order was refused.
     ///
-    /// The book is unchanged and the order is never `Accepted`. Refusals of
-    /// cancels and replaces are not reported with this event.
+    /// The book is unchanged and the order is never `Accepted`. Refused
+    /// cancels and replaces are reported with `CancelRejected`.
     ///
     /// A market order that trades at all is accepted and its remainder is
     /// canceled; only an empty opposite side rejects it.
@@ -40,6 +40,18 @@ pub enum Event {
         order_id: OrderId,
         /// Why the order was refused.
         reason: RejectReason,
+    },
+    /// A cancel or replace request was refused.
+    ///
+    /// The order and the book are unchanged. `response_to` says which request
+    /// was refused.
+    CancelRejected {
+        /// The order the request named.
+        order_id: OrderId,
+        /// The request that was refused.
+        response_to: CancelRequest,
+        /// Why the request was refused.
+        reason: CancelRejectReason,
     },
     /// An incoming order traded against a resting one.
     Trade {
@@ -82,6 +94,28 @@ pub enum Event {
         /// New total quantity at the level; zero means the level is gone.
         qty: Qty,
     },
+}
+
+/// The kind of request a `CancelRejected` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum CancelRequest {
+    /// A request to remove a resting order.
+    Cancel,
+    /// A request to change a resting order's price and quantity.
+    Replace,
+}
+
+/// Why a cancel or replace request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum CancelRejectReason {
+    /// No such resting order: never placed, already filled, or already canceled.
+    UnknownOrder,
+    /// A replace would move a post-only order to a price that trades on arrival.
+    PostOnlyWouldCross,
 }
 
 /// Why an order was rejected.
@@ -153,6 +187,38 @@ mod tests {
                 reason,
             };
             let expected = json!({ "type": "rejected", "order_id": 7, "reason": wire });
+            assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+            assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn cancel_rejected_has_a_fixed_wire_form() {
+        for (response_to, request, reason, wire) in [
+            (
+                CancelRequest::Cancel,
+                "cancel",
+                CancelRejectReason::UnknownOrder,
+                "unknown_order",
+            ),
+            (
+                CancelRequest::Replace,
+                "replace",
+                CancelRejectReason::PostOnlyWouldCross,
+                "post_only_would_cross",
+            ),
+        ] {
+            let event = Event::CancelRejected {
+                order_id: 7,
+                response_to,
+                reason,
+            };
+            let expected = json!({
+                "type": "cancel_rejected",
+                "order_id": 7,
+                "response_to": request,
+                "reason": wire,
+            });
             assert_eq!(serde_json::to_value(&event).unwrap(), expected);
             assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
         }

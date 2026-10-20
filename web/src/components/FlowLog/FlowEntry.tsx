@@ -1,6 +1,10 @@
 import { memo } from "react";
 import type { LogEntry } from "../../feed/log";
-import { REJECT_REASON_LABELS } from "../../feed/rejectReasons";
+import {
+  CANCEL_REJECT_REASON_LABELS,
+  CANCEL_REQUEST_LABELS,
+  REJECT_REASON_LABELS,
+} from "../../feed/rejectReasons";
 import { formatClock, formatUnits, isoTime } from "../../format/number";
 import type { MarketInfo } from "../../protocol/MarketInfo";
 import type { TimeInForce } from "../../protocol/TimeInForce";
@@ -67,6 +71,13 @@ function Detail({ entry, market }: Props) {
           <span className={styles.ref}>#{body.order_id}</span>
         </>
       );
+    case "cancel_rejected":
+      return (
+        <>
+          {CANCEL_REJECT_REASON_LABELS[body.reason]}
+          <span className={styles.ref}>#{body.order_id}</span>
+        </>
+      );
     case "trade":
       return (
         <>
@@ -104,7 +115,11 @@ export const FlowEntry = memo(function FlowEntry({ entry, market }: Props) {
       <time className={styles.time} dateTime={isoTime(entry.ts)}>
         {formatClock(entry.ts)}
       </time>
-      <span className={styles.type}>{LABELS[type]}</span>
+      <span className={styles.type}>
+        {entry.body.type === "cancel_rejected"
+          ? CANCEL_REQUEST_LABELS[entry.body.response_to]
+          : LABELS[entry.body.type]}
+      </span>
       <span className={styles.detail}>
         <Detail entry={entry} market={market} />
       </span>

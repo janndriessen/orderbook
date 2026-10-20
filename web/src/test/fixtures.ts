@@ -1,3 +1,5 @@
+import type { CancelRejectReason } from "../protocol/CancelRejectReason";
+import type { CancelRequest } from "../protocol/CancelRequest";
 import type { Envelope } from "../protocol/Envelope";
 import type { Event } from "../protocol/Event";
 import type { FeedMessage } from "../protocol/FeedMessage";
@@ -33,6 +35,18 @@ export const accepted = (seq: number, order_type: OrderType = limit) =>
     side: "buy",
     order_type,
     qty: 500,
+  });
+
+export const cancelRejected = (
+  seq: number,
+  reason: CancelRejectReason,
+  response_to: CancelRequest = "cancel",
+) =>
+  envelope(seq, {
+    type: "cancel_rejected",
+    order_id: seq,
+    response_to,
+    reason,
   });
 
 export const rejected = (seq: number, reason: RejectReason) =>

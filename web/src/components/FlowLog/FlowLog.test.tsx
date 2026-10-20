@@ -5,6 +5,7 @@ import { appendEvents, type LogEntry } from "../../feed/log";
 import {
   accepted,
   canceled,
+  cancelRejected,
   market,
   rejected,
   replaced,
@@ -71,6 +72,26 @@ describe("FlowLog", () => {
   ] as const)("shows a rejected order's reason %s in words", (reason, text) => {
     render(<FlowLog entries={logOf(rejected(1, reason))} market={market} />);
     expect(items()[0]).toHaveTextContent(`Rejected${text}#1`);
+  });
+
+  it("shows a refused cancel with its reason, under Orders but not Trades", async () => {
+    const user = userEvent.setup();
+    const log = logOf(cancelRejected(1, "unknown_order"), trade(2));
+    render(<FlowLog entries={log} market={market} />);
+    await user.click(screen.getByRole("radio", { name: "Orders" }));
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toHaveTextContent("Cancel rejectedunknown order#1");
+    await user.click(screen.getByRole("radio", { name: "Trades" }));
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toHaveTextContent("Trade");
+  });
+
+  it("labels a refused replace as such", () => {
+    const entry = cancelRejected(1, "post_only_would_cross", "replace");
+    render(<FlowLog entries={logOf(entry)} market={market} />);
+    expect(items()[0]).toHaveTextContent(
+      "Replace rejectedpost-only would cross#1",
+    );
   });
 
   it("lists rejected orders under Orders and hides them under Trades", async () => {

@@ -173,7 +173,10 @@ pub fn encode(message: &FeedMessage) -> Frame {
 mod tests {
     use std::collections::BTreeMap;
 
-    use protocol::{Level, OrderType, Price, Qty, RejectReason, Side, TimeInForce};
+    use protocol::{
+        CancelRejectReason, CancelRequest, Level, OrderType, Price, Qty, RejectReason, Side,
+        TimeInForce,
+    };
 
     use super::*;
     use crate::app::market;
@@ -222,10 +225,19 @@ mod tests {
                 reason: RejectReason::PostOnlyWouldCross,
             },
         );
+        let cancel_rejected = env(
+            5,
+            Event::CancelRejected {
+                order_id: 9,
+                response_to: CancelRequest::Cancel,
+                reason: CancelRejectReason::UnknownOrder,
+            },
+        );
         publisher.ingest(accepted(1, 7));
         publisher.ingest(l2(2, Side::Buy, 100, 5));
         publisher.ingest(l2(3, Side::Sell, 101, 3));
         publisher.ingest(rejected.clone());
+        publisher.ingest(cancel_rejected.clone());
         assert_eq!(publisher.tick(), Some(1));
 
         let FeedMessage::Update {
@@ -240,11 +252,11 @@ mod tests {
         assert_eq!((seq, bids, asks), (1, vec![lvl(100, 5)], vec![lvl(101, 3)]));
         assert_eq!(
             events,
-            vec![accepted(1, 7), rejected],
+            vec![accepted(1, 7), rejected, cancel_rejected],
             "L2Update must not be forwarded"
         );
 
-        publisher.ingest(l2(5, Side::Buy, 100, 0));
+        publisher.ingest(l2(6, Side::Buy, 100, 0));
         assert_eq!(publisher.tick(), Some(2));
         let FeedMessage::Update { bids, asks, .. } = next_update(&mut rx) else {
             panic!("expected an update");

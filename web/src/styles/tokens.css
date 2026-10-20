@@ -83,7 +83,7 @@
   --z-status: 2;
   --z-toggle: 3;
   --log-time-width: 96px;
-  --log-type-width: 76px;
+  --log-type-width: 120px;
   --focus-width: 2px;
 
   /* Motion. Reduced-motion users get instant changes through the duration. */
