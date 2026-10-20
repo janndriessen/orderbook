@@ -1,0 +1,40 @@
+{
+  "description": "A post-only order stays post-only through a replace: moving it to 104 rests, moving it onto the ask at 105 is refused and leaves it at 104.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 105, "time_in_force": "gtc"}, "qty": 2},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 105, "time_in_force": "gtc"}, "qty": 2},
+        {"type": "l2_update", "side": "sell", "price": 105, "qty": 2}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "post_only"}, "qty": 1},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "post_only"}, "qty": 1},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 1}
+      ]
+    },
+    {
+      "command": {"type": "replace", "order_id": 2, "price": 104, "qty": 1},
+      "events": [
+        {"type": "replaced", "order_id": 2, "price": 104, "qty": 1},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 0},
+        {"type": "l2_update", "side": "buy", "price": 104, "qty": 1}
+      ]
+    },
+    {
+      "command": {"type": "replace", "order_id": 2, "price": 105, "qty": 1},
+      "events": [
+        {"type": "cancel_rejected", "order_id": 2, "response_to": "replace", "reason": "post_only_would_cross"}
+      ]
+    },
+    {
+      "command": {"type": "cancel", "order_id": 2},
+      "events": [
+        {"type": "canceled", "order_id": 2, "leaves_qty": 1},
+        {"type": "l2_update", "side": "buy", "price": 104, "qty": 0}
+      ]
+    }
+  ]
+}

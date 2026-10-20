@@ -243,7 +243,9 @@ impl Matcher {
             events.push(self.level_update(old.side, old.price));
             return events;
         }
-        self.book.cancel(order_id);
+        self.book
+            .cancel(order_id)
+            .expect("the order was just looked up in the book");
         let (remaining, touched) = self.take(order_id, old.side, Some(price), qty, &mut events);
         if remaining > 0 {
             self.book
