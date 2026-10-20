@@ -232,8 +232,15 @@ mod tests {
         for command in commands() {
             command_tx.send(command).await.expect("engine is running");
         }
-        // Let the engine hit the full queue before anyone reads.
-        sleep(Duration::from_millis(100)).await;
+        // Nobody reads until the first event fills the one-slot queue, so the
+        // engine's next send has to wait for the reads below.
+        timeout(WAIT, async {
+            while events.len() < events.max_capacity() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the engine fills the event queue");
 
         let expected = expected();
         assert!(expected.len() > 2, "more events than the queue holds");
