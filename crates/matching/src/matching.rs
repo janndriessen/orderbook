@@ -1,10 +1,13 @@
-//! Matching of incoming limit and market orders against the book.
+//! Matching of incoming orders against the book, and cancels of resting ones.
 
-use protocol::{Event, OrderId, OrderType, Price, Qty, RejectReason, Side, TimeInForce};
+use protocol::{
+    CancelRejectReason, CancelRequest, Event, OrderId, OrderType, Price, Qty, RejectReason, Side,
+    TimeInForce,
+};
 
 use crate::{OrderBook, RestingOrder};
 
-/// An order book plus the matching of incoming limit and market orders.
+/// An order book plus the matching of incoming orders and cancels.
 #[derive(Debug, Default)]
 pub struct Matcher {
     book: OrderBook,
@@ -137,6 +140,29 @@ impl Matcher {
         events
     }
 
+    /// Removes a resting order.
+    ///
+    /// The events are `Canceled`, carrying the order's open quantity, then an
+    /// `L2Update` with the new total of its level (zero if the level is gone).
+    /// An id that is not resting, whether never placed, filled or already
+    /// canceled, yields a lone `CancelRejected` and leaves the book unchanged.
+    pub fn cancel(&mut self, order_id: OrderId) -> Vec<Event> {
+        match self.book.cancel(order_id) {
+            Some(order) => vec![
+                Event::Canceled {
+                    order_id,
+                    leaves_qty: order.qty,
+                },
+                self.level_update(order.side, order.price),
+            ],
+            None => vec![Event::CancelRejected {
+                order_id,
+                response_to: CancelRequest::Cancel,
+                reason: CancelRejectReason::UnknownOrder,
+            }],
+        }
+    }
+
     /// Fills up to `qty` against the opposite side while its best price
     /// trades with `limit` (any price if `None`), pushing one `Trade` per
     /// fill. Returns the unfilled quantity and the consumed prices in order.
@@ -195,6 +221,27 @@ impl Matcher {
 mod tests {
     use super::*;
     use TimeInForce::{Gtc, Ioc, PostOnly};
+
+    fn queue(m: &Matcher, side: Side, price: Price) -> Vec<OrderId> {
+        m.book
+            .level(side, price)
+            .map_or(vec![], |level| level.orders().collect())
+    }
+
+    fn canceled(order_id: OrderId, leaves_qty: Qty) -> Event {
+        Event::Canceled {
+            order_id,
+            leaves_qty,
+        }
+    }
+
+    fn unknown_cancel(order_id: OrderId) -> Event {
+        Event::CancelRejected {
+            order_id,
+            response_to: CancelRequest::Cancel,
+            reason: CancelRejectReason::UnknownOrder,
+        }
+    }
 
     fn accepted_as(
         order_id: OrderId,
@@ -628,5 +675,85 @@ mod tests {
             events
         };
         assert_eq!(run(), run());
+    }
+
+    /// Three orders at 100 on `side` (ids 1, 2, 3; qty 10, 20, 30).
+    fn matcher_with_queue(side: Side) -> Matcher {
+        let mut m = Matcher::new();
+        for (id, qty) in [(1, 10), (2, 20), (3, 30)] {
+            m.place_limit(id, side, 100, Gtc, qty);
+        }
+        m
+    }
+
+    #[test]
+    fn cancel_front_middle_and_back_keeps_fifo_of_the_rest() {
+        for side in [Side::Buy, Side::Sell] {
+            for (id, qty, rest, total) in [
+                (1, 10, [2, 3], 50),
+                (2, 20, [1, 3], 40),
+                (3, 30, [1, 2], 30),
+            ] {
+                let mut m = matcher_with_queue(side);
+                assert_eq!(m.cancel(id), [canceled(id, qty), l2(side, 100, total)]);
+                assert_eq!(queue(&m, side, 100), rest);
+            }
+        }
+    }
+
+    #[test]
+    fn canceling_the_last_order_removes_the_level() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut m = Matcher::new();
+            m.place_limit(1, side, 100, Gtc, 5);
+            m.place_limit(2, side, 99, Gtc, 5);
+            assert_eq!(m.cancel(1), [canceled(1, 5), l2(side, 100, 0)]);
+            assert!(m.book.level(side, 100).is_none());
+            assert_eq!(queue(&m, side, 99), [2]);
+        }
+    }
+
+    #[test]
+    fn cancel_reports_the_open_quantity_of_a_partly_filled_order() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(2, Side::Buy, 100, Gtc, 2);
+        assert_eq!(m.cancel(1), [canceled(1, 3), l2(Side::Sell, 100, 0)]);
+    }
+
+    #[test]
+    fn canceling_an_unknown_id_is_rejected_and_leaves_the_book_alone() {
+        let mut m = matcher_with_queue(Side::Buy);
+        assert_eq!(m.cancel(99), [unknown_cancel(99)]);
+        assert_eq!(queue(&m, Side::Buy, 100), [1, 2, 3]);
+        assert_eq!(m.book.level(Side::Buy, 100).map(|l| l.total()), Some(60));
+    }
+
+    #[test]
+    fn canceling_a_filled_id_is_rejected() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(2, Side::Buy, 100, Gtc, 5);
+        assert_eq!(m.cancel(1), [unknown_cancel(1)]);
+        assert_eq!(m.cancel(2), [unknown_cancel(2)]);
+    }
+
+    #[test]
+    fn canceling_twice_is_rejected_the_second_time() {
+        let mut m = matcher_with_queue(Side::Sell);
+        m.cancel(2);
+        assert_eq!(m.cancel(2), [unknown_cancel(2)]);
+        assert_eq!(queue(&m, Side::Sell, 100), [1, 3]);
+    }
+
+    #[test]
+    fn a_canceled_id_can_be_placed_again() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 100, Gtc, 5);
+        m.cancel(1);
+        assert_eq!(
+            m.place_limit(1, Side::Buy, 99, Gtc, 2),
+            [accepted(1, Side::Buy, 99, 2), l2(Side::Buy, 99, 2)]
+        );
     }
 }
