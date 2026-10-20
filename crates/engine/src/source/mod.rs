@@ -18,7 +18,9 @@ pub use walk::RandomWalk;
 /// Capacity of the queue between the source and the engine.
 ///
 /// The source waits when the queue is full instead of dropping commands, so
-/// the capacity only has to absorb engine scheduling hiccups. The walk
+/// the capacity only has to absorb hiccups downstream. It also backs up when
+/// the engine waits, which happens only once the publisher has fallen a full
+/// event queue behind. The walk
 /// spaces commands 20 to 100 ms apart, so at most 50 and on average about 17
 /// per second; 1024 slots hold at least 20 seconds of commands.
 pub const COMMAND_QUEUE_CAPACITY: usize = 1024;

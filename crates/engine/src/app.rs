@@ -38,9 +38,10 @@ pub async fn run(
     let seed = seed.unwrap_or(start_ts);
     let (command_queue, commands) = mpsc::channel(source::COMMAND_QUEUE_CAPACITY);
     let (event_queue, events) = mpsc::channel(matcher::EVENT_QUEUE_CAPACITY);
-    // Fallible steps come first so that an early return leaves nothing running.
-    // If the source fails to start, the engine's command queue closes with the
-    // dropped sender and the engine thread exits on its own.
+    // Fallible steps come before the publisher and the server start, so an
+    // early return leaves neither running without a way to shut down. If the
+    // source fails to start, the engine thread is already running; it exits on
+    // its own once the dropped sender closes its command queue.
     let engine = matcher::spawn(commands, event_queue)?;
     let source = source::spawn(RandomWalk::new(seed, start_ts), command_queue)?;
     let (handle, publisher) = publisher::spawn(market(), events, shutdown.clone());

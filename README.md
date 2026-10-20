@@ -37,7 +37,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
-- [x] Random-walk order flow on the source thread drives the `matching` crate inside the service, which runs alone on its own engine thread behind a bounded command queue
+- [x] The `matching` crate runs alone on its own engine thread, driven by random-walk order flow from the source thread through a bounded command queue
 - [ ] Gateway that validates and sequences commands in front of the engine thread
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.

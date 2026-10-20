@@ -11,8 +11,9 @@ use tracing::{debug, info};
 ///
 /// The engine waits when the queue is full instead of dropping events, so the
 /// capacity only has to absorb bursts and publisher scheduling hiccups, not
-/// sustained overload. At about 38 events per second, 4096 slots hold well
-/// over a minute of output, far more than the publisher's 100 ms tick needs.
+/// sustained overload. The walk's order flow produces about 38 events per
+/// second (measured: about 2.3 per command), so 4096 slots hold well over a
+/// minute of output, far more than the publisher's 100 ms tick needs.
 pub const EVENT_QUEUE_CAPACITY: usize = 4096;
 
 /// A matcher that numbers its output.
@@ -55,8 +56,9 @@ impl SequencedMatcher {
 ///
 /// The thread owns a [`SequencedMatcher`], runs every command from `commands`
 /// through it in arrival order and sends the resulting events to `events`. It
-/// stops once `commands` is closed and drained, or when the receiving end of
-/// `events` is dropped; either way the command receiver is dropped with it,
+/// stops once `commands` is closed and drained, or as soon as a send fails
+/// because the receiving end of `events` is gone; while it waits for a command
+/// it cannot notice that. Either way the command receiver is dropped with it,
 /// which tells the sender to stop.
 pub fn spawn(
     mut commands: mpsc::Receiver<(Ts, Command)>,
