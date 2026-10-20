@@ -1,10 +1,10 @@
 //! Matching of incoming limit orders against the book.
 
-use protocol::{Event, OrderId, OrderType, Price, Qty, Side, TimeInForce};
+use protocol::{Event, OrderId, OrderType, Price, Qty, RejectReason, Side, TimeInForce};
 
 use crate::{OrderBook, RestingOrder};
 
-/// An order book plus the matching of incoming good-till-cancel limit orders.
+/// An order book plus the matching of incoming limit orders.
 #[derive(Debug, Default)]
 pub struct Matcher {
     book: OrderBook,
@@ -16,14 +16,19 @@ impl Matcher {
         Self::default()
     }
 
-    /// Matches a good-till-canceled limit order against the opposite side,
-    /// then rests any remainder at its limit price.
+    /// Matches a limit order against the opposite side.
     ///
     /// Trades execute at the maker's price, best price first and oldest order
-    /// first within a price. The events are `Accepted`, one `Trade` per fill,
-    /// then one `L2Update` per price level the order touched, carrying the
-    /// level's final total: the consumed levels in consumption order, then the
-    /// level it rests in.
+    /// first within a price. What happens to the remainder depends on
+    /// `time_in_force`: good-till-cancel and post-only orders rest it at the
+    /// limit price, an immediate-or-cancel order cancels it. A post-only order
+    /// that would trade on arrival is rejected instead, and nothing else
+    /// happens.
+    ///
+    /// The events are `Accepted`, one `Trade` per fill, `Canceled` for an
+    /// unrested remainder, then one `L2Update` per price level the order
+    /// touched, carrying the level's final total: the consumed levels in
+    /// consumption order, then the level it rests in.
     ///
     /// # Panics
     ///
@@ -34,6 +39,7 @@ impl Matcher {
         order_id: OrderId,
         side: Side,
         price: Price,
+        time_in_force: TimeInForce,
         qty: Qty,
     ) -> Vec<Event> {
         assert!(qty > 0, "orders have a positive quantity");
@@ -41,12 +47,25 @@ impl Matcher {
             !self.book.contains(order_id),
             "the gateway rejects order ids that are already resting"
         );
+        let rests = match time_in_force {
+            TimeInForce::Gtc => true,
+            TimeInForce::Ioc => false,
+            TimeInForce::PostOnly => {
+                if self.crosses(side, price) {
+                    return vec![Event::Rejected {
+                        order_id,
+                        reason: RejectReason::PostOnlyWouldCross,
+                    }];
+                }
+                true
+            }
+        };
         let mut events = vec![Event::Accepted {
             order_id,
             side,
             order_type: OrderType::Limit {
                 price,
-                time_in_force: TimeInForce::Gtc,
+                time_in_force,
             },
             qty,
         }];
@@ -74,10 +93,16 @@ impl Matcher {
                 touched.push(fill.price);
             }
         }
+        if remaining > 0 && !rests {
+            events.push(Event::Canceled {
+                order_id,
+                leaves_qty: remaining,
+            });
+        }
         for level_price in touched {
             events.push(self.level_update(opposite, level_price));
         }
-        if remaining > 0 {
+        if remaining > 0 && rests {
             let resting = RestingOrder {
                 order_id,
                 side,
@@ -112,17 +137,28 @@ impl Matcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TimeInForce::{Gtc, Ioc, PostOnly};
 
-    fn accepted(order_id: OrderId, side: Side, price: Price, qty: Qty) -> Event {
+    fn accepted_as(
+        order_id: OrderId,
+        side: Side,
+        price: Price,
+        time_in_force: TimeInForce,
+        qty: Qty,
+    ) -> Event {
         Event::Accepted {
             order_id,
             side,
             order_type: OrderType::Limit {
                 price,
-                time_in_force: TimeInForce::Gtc,
+                time_in_force,
             },
             qty,
         }
+    }
+
+    fn accepted(order_id: OrderId, side: Side, price: Price, qty: Qty) -> Event {
+        accepted_as(order_id, side, price, Gtc, qty)
     }
 
     fn trade(maker: OrderId, taker: OrderId, side: Side, price: Price, qty: Qty) -> Event {
@@ -142,9 +178,9 @@ mod tests {
     #[test]
     fn non_crossing_order_rests() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Sell, 101, 5);
+        m.place_limit(1, Side::Sell, 101, Gtc, 5);
         assert_eq!(
-            m.place_limit(2, Side::Buy, 100, 3),
+            m.place_limit(2, Side::Buy, 100, Gtc, 3),
             [accepted(2, Side::Buy, 100, 3), l2(Side::Buy, 100, 3)]
         );
     }
@@ -152,9 +188,9 @@ mod tests {
     #[test]
     fn full_fill_at_the_makers_better_price_empties_the_level() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Sell, 100, 5);
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
         assert_eq!(
-            m.place_limit(2, Side::Buy, 105, 5),
+            m.place_limit(2, Side::Buy, 105, Gtc, 5),
             [
                 accepted(2, Side::Buy, 105, 5),
                 trade(1, 2, Side::Buy, 100, 5),
@@ -166,11 +202,11 @@ mod tests {
     #[test]
     fn partly_filled_maker_keeps_priority() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Sell, 100, 5);
-        m.place_limit(2, Side::Sell, 100, 5);
-        m.place_limit(3, Side::Buy, 100, 2);
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(2, Side::Sell, 100, Gtc, 5);
+        m.place_limit(3, Side::Buy, 100, Gtc, 2);
         assert_eq!(
-            m.place_limit(4, Side::Buy, 100, 4),
+            m.place_limit(4, Side::Buy, 100, Gtc, 4),
             [
                 accepted(4, Side::Buy, 100, 4),
                 trade(1, 4, Side::Buy, 100, 3),
@@ -183,12 +219,12 @@ mod tests {
     #[test]
     fn sweep_takes_levels_and_makers_in_priority_order() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Sell, 101, 2);
-        m.place_limit(2, Side::Sell, 100, 2);
-        m.place_limit(3, Side::Sell, 100, 3);
-        m.place_limit(4, Side::Sell, 103, 9);
+        m.place_limit(1, Side::Sell, 101, Gtc, 2);
+        m.place_limit(2, Side::Sell, 100, Gtc, 2);
+        m.place_limit(3, Side::Sell, 100, Gtc, 3);
+        m.place_limit(4, Side::Sell, 103, Gtc, 9);
         assert_eq!(
-            m.place_limit(5, Side::Buy, 102, 10),
+            m.place_limit(5, Side::Buy, 102, Gtc, 10),
             [
                 accepted(5, Side::Buy, 102, 10),
                 trade(2, 5, Side::Buy, 100, 2),
@@ -204,10 +240,10 @@ mod tests {
     #[test]
     fn sell_taker_trades_against_bids() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Buy, 99, 4);
-        m.place_limit(2, Side::Buy, 100, 4);
+        m.place_limit(1, Side::Buy, 99, Gtc, 4);
+        m.place_limit(2, Side::Buy, 100, Gtc, 4);
         assert_eq!(
-            m.place_limit(3, Side::Sell, 99, 6),
+            m.place_limit(3, Side::Sell, 99, Gtc, 6),
             [
                 accepted(3, Side::Sell, 99, 6),
                 trade(2, 3, Side::Sell, 100, 4),
@@ -221,9 +257,9 @@ mod tests {
     #[test]
     fn order_joining_an_existing_level_reports_the_level_total() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Buy, 102, 5);
+        m.place_limit(1, Side::Buy, 102, Gtc, 5);
         assert_eq!(
-            m.place_limit(2, Side::Buy, 102, 3),
+            m.place_limit(2, Side::Buy, 102, Gtc, 3),
             [accepted(2, Side::Buy, 102, 3), l2(Side::Buy, 102, 8)]
         );
     }
@@ -231,9 +267,9 @@ mod tests {
     #[test]
     fn sell_remainder_rests_after_trading() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Buy, 100, 2);
+        m.place_limit(1, Side::Buy, 100, Gtc, 2);
         assert_eq!(
-            m.place_limit(2, Side::Sell, 100, 5),
+            m.place_limit(2, Side::Sell, 100, Gtc, 5),
             [
                 accepted(2, Side::Sell, 100, 5),
                 trade(1, 2, Side::Sell, 100, 2),
@@ -247,14 +283,161 @@ mod tests {
     #[should_panic(expected = "already resting")]
     fn duplicate_id_on_the_opposite_side_panics_before_matching() {
         let mut m = Matcher::new();
-        m.place_limit(1, Side::Sell, 100, 5);
-        m.place_limit(1, Side::Buy, 100, 8);
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(1, Side::Buy, 100, Gtc, 8);
     }
 
     #[test]
     #[should_panic(expected = "positive quantity")]
     fn zero_quantity_panics() {
-        Matcher::new().place_limit(1, Side::Buy, 100, 0);
+        Matcher::new().place_limit(1, Side::Buy, 100, Gtc, 0);
+    }
+
+    #[test]
+    fn ioc_partial_fill_cancels_the_remainder() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 2);
+        assert_eq!(
+            m.place_limit(2, Side::Buy, 100, Ioc, 5),
+            [
+                accepted_as(2, Side::Buy, 100, Ioc, 5),
+                trade(1, 2, Side::Buy, 100, 2),
+                Event::Canceled {
+                    order_id: 2,
+                    leaves_qty: 3
+                },
+                l2(Side::Sell, 100, 0),
+            ]
+        );
+        assert_eq!(m.book.best_bid(), None);
+    }
+
+    #[test]
+    fn ioc_without_a_fill_is_accepted_then_canceled() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 101, Gtc, 2);
+        assert_eq!(
+            m.place_limit(2, Side::Buy, 100, Ioc, 5),
+            [
+                accepted_as(2, Side::Buy, 100, Ioc, 5),
+                Event::Canceled {
+                    order_id: 2,
+                    leaves_qty: 5
+                },
+            ]
+        );
+        assert_eq!(m.book.best_bid(), None);
+    }
+
+    #[test]
+    fn ioc_full_fill_emits_no_cancel() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        assert_eq!(
+            m.place_limit(2, Side::Buy, 100, Ioc, 5),
+            [
+                accepted_as(2, Side::Buy, 100, Ioc, 5),
+                trade(1, 2, Side::Buy, 100, 5),
+                l2(Side::Sell, 100, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn ioc_against_an_empty_book_is_accepted_then_canceled() {
+        assert_eq!(
+            Matcher::new().place_limit(1, Side::Sell, 100, Ioc, 4),
+            [
+                accepted_as(1, Side::Sell, 100, Ioc, 4),
+                Event::Canceled {
+                    order_id: 1,
+                    leaves_qty: 4
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn crossing_sell_post_only_is_rejected_and_leaves_the_book_alone() {
+        for price in [100, 99] {
+            let mut m = Matcher::new();
+            m.place_limit(1, Side::Buy, 100, Gtc, 5);
+            let events = m.place_limit(2, Side::Sell, price, PostOnly, 3);
+            let reason = RejectReason::PostOnlyWouldCross;
+            assert_eq!(
+                events,
+                [Event::Rejected {
+                    order_id: 2,
+                    reason
+                }]
+            );
+            assert_eq!((m.book.best_bid(), m.book.best_ask()), (Some(100), None));
+            assert_eq!(m.book.level(Side::Buy, 100).map(|l| l.total()), Some(5));
+        }
+    }
+
+    #[test]
+    fn post_only_against_an_empty_side_rests() {
+        assert_eq!(
+            Matcher::new().place_limit(1, Side::Buy, 100, PostOnly, 3),
+            [
+                accepted_as(1, Side::Buy, 100, PostOnly, 3),
+                l2(Side::Buy, 100, 3)
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "already resting")]
+    fn duplicate_id_panics_even_on_a_crossing_post_only() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(1, Side::Buy, 100, PostOnly, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive quantity")]
+    fn zero_quantity_panics_even_on_a_crossing_post_only() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(2, Side::Buy, 100, PostOnly, 0);
+    }
+
+    #[test]
+    fn crossing_post_only_is_rejected_and_leaves_the_book_alone() {
+        for post_only_price in [100, 101] {
+            let mut m = Matcher::new();
+            m.place_limit(1, Side::Sell, 100, Gtc, 5);
+            m.place_limit(2, Side::Buy, 99, Gtc, 4);
+            let events = m.place_limit(3, Side::Buy, post_only_price, PostOnly, 3);
+            let rejected = Event::Rejected {
+                order_id: 3,
+                reason: RejectReason::PostOnlyWouldCross,
+            };
+            assert_eq!(events, [rejected]);
+            assert_eq!(
+                (m.book.best_bid(), m.book.best_ask()),
+                (Some(99), Some(100))
+            );
+            let total = |side, price| m.book.level(side, price).map(|l| l.total());
+            assert_eq!(
+                (total(Side::Buy, 99), total(Side::Sell, 100)),
+                (Some(4), Some(5))
+            );
+        }
+    }
+
+    #[test]
+    fn non_crossing_post_only_rests_like_gtc() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 101, Gtc, 5);
+        assert_eq!(
+            m.place_limit(2, Side::Buy, 100, PostOnly, 3),
+            [
+                accepted_as(2, Side::Buy, 100, PostOnly, 3),
+                l2(Side::Buy, 100, 3)
+            ]
+        );
     }
 
     #[test]
@@ -268,7 +451,7 @@ mod tests {
                 (4, Side::Buy, 99, 5),
                 (5, Side::Sell, 99, 7),
             ];
-            orders.map(|(id, side, price, qty)| m.place_limit(id, side, price, qty))
+            orders.map(|(id, side, price, qty)| m.place_limit(id, side, price, Gtc, qty))
         };
         assert_eq!(run(), run());
     }

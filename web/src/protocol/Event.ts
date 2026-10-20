@@ -7,7 +7,8 @@ import type { Side } from "./Side";
  * Something that happened in the engine as the result of a command.
  *
  * One command can produce several events: an aggressive order produces
- * `Accepted`, one `Trade` per matched maker, and the resulting `L2Update`s.
+ * `Accepted`, one `Trade` per matched maker, `Canceled` if an
+ * immediate-or-cancel remainder is left, and the resulting `L2Update`s.
  */
 export type Event = {
   "type": "accepted";

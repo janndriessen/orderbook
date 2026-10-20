@@ -7,7 +7,8 @@ use crate::{OrderId, OrderType, Price, Qty, Side};
 /// Something that happened in the engine as the result of a command.
 ///
 /// One command can produce several events: an aggressive order produces
-/// `Accepted`, one `Trade` per matched maker, and the resulting `L2Update`s.
+/// `Accepted`, one `Trade` per matched maker, `Canceled` if an
+/// immediate-or-cancel remainder is left, and the resulting `L2Update`s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -61,7 +62,10 @@ pub enum Event {
         /// Open quantity after the change.
         qty: Qty,
     },
-    /// An order left the book without being filled.
+    /// An order, or its unfilled remainder, was canceled.
+    ///
+    /// An immediate-or-cancel order reports its remainder this way, possibly
+    /// after partial fills.
     Canceled {
         /// The canceled order.
         order_id: OrderId,

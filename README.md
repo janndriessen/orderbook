@@ -35,7 +35,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
-- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel limit orders with price-time priority; IOC, post-only, market, cancel and replace are not there yet
+- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders with price-time priority; market, cancel and replace are not there yet
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
@@ -87,8 +87,8 @@ Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `cr
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
-- **Order types:** only good-till-cancel limit orders exist so far; IOC, post-only and market are planned (the random-walk source labels its takers IOC, and they always fill in full). There is no fill-or-kill, stop or iceberg.
-- **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority.
+- **Order types:** limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced); market is planned. There is no fill-or-kill, stop or iceberg.
+- **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority. Its takers are labeled IOC and always fill in full, so it never emits `Canceled` for an IOC remainder.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Dead clients:** the server drops a vanished client once its writes, at least one per second, back up and hit the send timeout, typically within tens of seconds. Production servers also send WebSocket pings to detect them within a fixed interval.
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.
