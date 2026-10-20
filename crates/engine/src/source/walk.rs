@@ -103,7 +103,7 @@ impl RandomWalk {
             // Takers run in streaks, which lets the price trend for a while
             // before it turns instead of jittering around one level.
             let side = if self.rng.random_range(0..4) == 0 {
-                opposite(self.last_taker)
+                self.last_taker.opposite()
             } else {
                 self.last_taker
             };
@@ -166,7 +166,7 @@ impl RandomWalk {
     /// closes a spread that takers have opened.
     fn place(&mut self, side: Side, out: &mut Vec<Envelope<Event>>) {
         let reference = (self.book.best(side))
-            .or_else(|| self.book.best(opposite(side)))
+            .or_else(|| self.book.best(side.opposite()))
             .unwrap_or(START_PRICE);
         let behind = match self.rng.random_range(0..100) {
             0..30 => -1,
@@ -279,7 +279,7 @@ impl RandomWalk {
     /// level, oldest maker first. Without a second level behind it the touch
     /// is left alone and liquidity is added instead.
     fn take(&mut self, side: Side, out: &mut Vec<Envelope<Event>>) {
-        let maker_side = opposite(side);
+        let maker_side = side.opposite();
         let Some(price) = self.book.best(maker_side) else {
             return self.place(side, out);
         };
@@ -337,13 +337,6 @@ impl RandomWalk {
             }
         }
         self.emit_level(out, maker_side, price);
-    }
-}
-
-fn opposite(side: Side) -> Side {
-    match side {
-        Side::Buy => Side::Sell,
-        Side::Sell => Side::Buy,
     }
 }
 
@@ -540,7 +533,7 @@ mod tests {
                         maker_order_id,
                         aggressor_side,
                         ..
-                    } => Some((opposite(aggressor_side), maker_order_id)),
+                    } => Some((aggressor_side.opposite(), maker_order_id)),
                     _ => None,
                 })
                 .collect();

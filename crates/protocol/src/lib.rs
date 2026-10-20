@@ -53,6 +53,16 @@ pub enum Side {
     Sell,
 }
 
+impl Side {
+    /// The other side: the one an order of this side trades against.
+    pub fn opposite(self) -> Side {
+        match self {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+        }
+    }
+}
+
 /// Wraps every message on a stream with its sequence number and venue time.
 ///
 /// `seq` lets the receiver detect gaps and reordering. `ts` is venue time, taken
@@ -73,6 +83,12 @@ pub struct Envelope<T> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn opposite_flips_the_side() {
+        assert_eq!(Side::Buy.opposite(), Side::Sell);
+        assert_eq!(Side::Sell.opposite(), Side::Buy);
+    }
 
     #[test]
     fn side_serializes_lowercase() {

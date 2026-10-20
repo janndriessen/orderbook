@@ -77,7 +77,7 @@ impl Matcher {
             });
         }
         for level_price in touched {
-            events.push(self.level_update(opposite(side), level_price));
+            events.push(self.level_update(side.opposite(), level_price));
         }
         if remaining > 0 && rests {
             let resting = RestingOrder {
@@ -132,7 +132,7 @@ impl Matcher {
             });
         }
         for level_price in touched {
-            events.push(self.level_update(opposite(side), level_price));
+            events.push(self.level_update(side.opposite(), level_price));
         }
         events
     }
@@ -153,7 +153,7 @@ impl Matcher {
         while remaining > 0 && self.crosses(side, limit) {
             let fill = self
                 .book
-                .fill_best(opposite(side), remaining)
+                .fill_best(side.opposite(), remaining)
                 .expect("crosses() saw a best price on the opposite side");
             remaining -= fill.qty;
             events.push(Event::Trade {
@@ -188,13 +188,6 @@ impl Matcher {
             .level(side, price)
             .map_or(0, |level| level.total());
         Event::L2Update { side, price, qty }
-    }
-}
-
-fn opposite(side: Side) -> Side {
-    match side {
-        Side::Buy => Side::Sell,
-        Side::Sell => Side::Buy,
     }
 }
 
