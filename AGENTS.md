@@ -79,7 +79,7 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 
 - **The protocol is the contract.** Every external source enters through an adapter that translates into `crates/protocol`; nothing else crosses a component boundary. Protocol changes are proposed, never slipped in.
 - **The engine is deterministic.** Same command sequence in, same event sequence out. No clocks, randomness, I/O, or hash-iteration order in the matching path; timestamps come from the input envelopes.
-- **The engine runs alone.** One dedicated OS thread, not a Tokio task. No locks, no async, no database in the hot path. Bounded queues are its only link to the rest of the service. It never touches network I/O; when its output queue is full it waits (backpressure) and never drops events.
+- **The engine runs alone.** One dedicated OS thread, not a Tokio task. No locks, no async, no database in the hot path. Bounded queues are its only link to the rest of the service; their internals are the one exception to the rules above: a lock taken on every receive and on any send that has to wait, and the parking a blocking send or receive uses. It never touches network I/O; when its output queue is full it waits (backpressure) and never drops events.
 - **Integers for money.** Prices are ticks (`i64`), sizes are lots (`u64`). No floats in the engine or the protocol; conversion to decimals happens only for display.
 - **Price-time priority.** Price levels sorted per side, FIFO within a level. Any deviation (e.g. Hyperliquid's in-block ordering) lives in an adapter or replayer, not in the book.
 - **The gateway checks only what it can know.** Stateless checks (tick, size, duplicate id) in the gateway; anything that needs book state is the engine's to reject.
