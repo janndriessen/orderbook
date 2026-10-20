@@ -38,7 +38,9 @@ pub enum Command {
     ///
     /// Gives the full new price and quantity, not a delta. A price change or
     /// a quantity increase loses time priority; a pure quantity decrease
-    /// keeps it.
+    /// keeps it. A new price that trades on arrival makes the replace
+    /// marketable: it trades like a new order, and a post-only order is
+    /// refused instead.
     Replace {
         /// The order to replace.
         order_id: OrderId,

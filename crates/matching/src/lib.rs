@@ -5,7 +5,7 @@
 //! out other I/O, such as std `fs` and clocks, is up to review.
 //!
 //! It holds the order book, the matching of limit and market orders, and the
-//! cancel of resting orders.
+//! cancel and replace of resting orders.
 
 mod book;
 mod matching;
