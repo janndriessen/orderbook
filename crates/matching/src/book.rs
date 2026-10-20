@@ -101,6 +101,40 @@ impl OrderBook {
         self.orders.contains_key(&order_id)
     }
 
+    /// The resting order with this id, or `None` if it is not resting.
+    pub fn order(&self, order_id: OrderId) -> Option<RestingOrder> {
+        self.orders.get(&order_id).copied()
+    }
+
+    /// Lowers a resting order's quantity to `qty`, keeping its place in the
+    /// queue.
+    ///
+    /// # Panics
+    ///
+    /// If `qty` is zero or above the order's open quantity, or the id is not
+    /// resting. Callers check the order first and cancel to remove it.
+    pub fn reduce(&mut self, order_id: OrderId, qty: Qty) {
+        assert!(qty > 0, "resting orders have a positive quantity");
+        let order = self
+            .orders
+            .get_mut(&order_id)
+            .expect("only resting orders can be reduced");
+        let cut = order
+            .qty
+            .checked_sub(qty)
+            .expect("a reduction does not raise the quantity");
+        order.qty = qty;
+        let level = match order.side {
+            Side::Buy => self.bids.get_mut(&order.price),
+            Side::Sell => self.asks.get_mut(&order.price),
+        }
+        .expect("every indexed order rests in its side's level at its price");
+        level.total = level
+            .total
+            .checked_sub(cut)
+            .expect("a level's total includes every order queued in it");
+    }
+
     /// Removes a resting order, or returns `None` if the id is unknown.
     ///
     /// Scans the order's level for its place in the queue, so the cost is
@@ -283,6 +317,44 @@ mod tests {
         assert_eq!(total(&book), Some(40));
         book.add(order(4, Side::Buy, 100, 5)).unwrap();
         assert_eq!(total(&book), Some(45));
+    }
+
+    #[test]
+    fn reduce_keeps_the_queue_position_and_updates_the_total() {
+        let mut book = book_with_queue();
+        book.reduce(2, 5);
+        assert_eq!(book.order(2), Some(order(2, Side::Buy, 100, 5)));
+        assert_eq!(queue_of(&book, Side::Buy, 100), [1, 2, 3]);
+        assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(45));
+        book.reduce(2, 5);
+        assert_eq!(book.level(Side::Buy, 100).map(PriceLevel::total), Some(45));
+    }
+
+    #[test]
+    fn order_looks_up_resting_orders_only() {
+        let mut book = book_with_queue();
+        assert_eq!(book.order(3), Some(order(3, Side::Buy, 100, 30)));
+        book.cancel(3);
+        assert_eq!(book.order(3), None);
+        assert_eq!(book.order(99), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not raise the quantity")]
+    fn reduce_cannot_raise_the_quantity() {
+        book_with_queue().reduce(1, 11);
+    }
+
+    #[test]
+    #[should_panic(expected = "resting orders have a positive quantity")]
+    fn reduce_to_zero_panics() {
+        book_with_queue().reduce(1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only resting orders can be reduced")]
+    fn reduce_of_an_unknown_id_panics() {
+        book_with_queue().reduce(99, 1);
     }
 
     #[test]
