@@ -21,6 +21,11 @@ impl Matcher {
         Self::default()
     }
 
+    /// The book, for reading its levels and resting orders.
+    pub fn book(&self) -> &OrderBook {
+        &self.book
+    }
+
     /// Runs one command and returns the events it produced.
     ///
     /// The engine's input: `Cancel` and `Replace` go to the method of the same
@@ -383,6 +388,16 @@ mod tests {
 
     fn l2(side: Side, price: Price, qty: Qty) -> Event {
         Event::L2Update { side, price, qty }
+    }
+
+    #[test]
+    fn book_shows_what_rests() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 101, Gtc, 5);
+        m.place_limit(2, Side::Buy, 101, Gtc, 2);
+        assert_eq!(m.book().len(), 1);
+        assert_eq!(m.book().best_ask(), Some(101));
+        assert_eq!(m.book().order(1).map(|order| order.qty), Some(3));
     }
 
     #[test]

@@ -174,6 +174,25 @@ impl OrderBook {
         self.asks.keys().next().copied()
     }
 
+    /// Number of orders resting in the book, both sides combined.
+    pub fn len(&self) -> usize {
+        self.orders.len()
+    }
+
+    /// Whether no order rests on either side.
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
+
+    /// The levels on `side` with their prices, in ascending price order.
+    pub fn levels(&self, side: Side) -> impl Iterator<Item = (Price, &PriceLevel)> {
+        let levels = match side {
+            Side::Buy => &self.bids,
+            Side::Sell => &self.asks,
+        };
+        levels.iter().map(|(&price, level)| (price, level))
+    }
+
     /// Fills up to `max_qty` of the front order at the best price on `side`,
     /// or returns `None` if the side is empty.
     ///
@@ -270,6 +289,41 @@ mod tests {
             book.add(order(id, Side::Buy, 100, qty)).unwrap();
         }
         book
+    }
+
+    #[test]
+    fn levels_list_each_side_by_ascending_price() {
+        let mut book = OrderBook::new();
+        for (id, side, price) in [
+            (1, Side::Buy, 98),
+            (2, Side::Buy, 99),
+            (3, Side::Sell, 102),
+            (4, Side::Sell, 101),
+            (5, Side::Buy, 99),
+        ] {
+            book.add(order(id, side, price, 5)).unwrap();
+        }
+        let levels = |side| {
+            book.levels(side)
+                .map(|(price, level)| (price, level.total()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(levels(Side::Buy), [(98, 5), (99, 10)]);
+        assert_eq!(levels(Side::Sell), [(101, 5), (102, 5)]);
+    }
+
+    #[test]
+    fn len_counts_the_resting_orders() {
+        let mut book = book_with_queue();
+        assert_eq!(book.len(), 3);
+        assert!(!book.is_empty());
+        book.fill_best(Side::Buy, 10);
+        assert_eq!(book.len(), 2, "a filled order leaves");
+        book.fill_best(Side::Buy, 5);
+        assert_eq!(book.len(), 2, "a partly filled order stays");
+        book.cancel(3);
+        book.cancel(2);
+        assert!(book.is_empty());
     }
 
     #[test]
