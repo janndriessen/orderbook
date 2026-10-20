@@ -17,7 +17,7 @@ The diagram shows the target design. Principles:
 - **Single-threaded, deterministic engine.** One dedicated OS thread, in memory, price-time priority, no locks or database in the hot path. The same command sequence always produces the same event sequence; timestamps come from the input stream, never from a clock.
 - **Integers for money.** Prices are ticks (`i64`), quantities are lots (`u64`). Decimals appear only at display time.
 - **Publisher batching with snapshot and sequenced diffs.** The publisher keeps its own aggregated copy of the book and sends one combined diff every 100 ms. New clients receive a snapshot first; every message carries a sequence number, so clients detect gaps and resync from a snapshot. After about a second without any message the publisher sends a heartbeat that repeats the latest sequence number without advancing it. A client that hears nothing for 3.5 seconds (three missed heartbeats plus half an interval of slack), or gets no first message within 10 seconds of connecting, treats the connection as dead and reconnects with a fresh snapshot.
-- **Bounded queues only.** The engine's sole link to the networked side (Tokio, Axum) is bounded in-memory queues, and it never waits on the publisher.
+- **Bounded queues only.** The engine's sole link to the networked side (Tokio, Axum) is bounded in-memory queues. When its output queue is full it waits for the publisher to catch up (backpressure) and never drops an event.
 
 ## Web UI
 
