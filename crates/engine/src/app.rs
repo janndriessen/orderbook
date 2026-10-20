@@ -1,5 +1,6 @@
 //! Wires the source, the engine, the publisher and the WebSocket server together.
 
+use std::any::Any;
 use std::io;
 use std::thread::JoinHandle;
 
@@ -72,8 +73,8 @@ pub async fn run(
     Ok(())
 }
 
-/// Waits for each named thread to end, in order, and logs any that panicked
-/// or could not be joined.
+/// Waits for each named thread to end, in order, and logs any that panicked,
+/// with its panic message, or could not be joined.
 ///
 /// Returns whether every thread ended normally. A failure does not stop the
 /// joining, so every thread is waited for. Joining blocks, so it runs off the
@@ -83,8 +84,9 @@ async fn join_threads(threads: Vec<(&'static str, JoinHandle<()>)>) -> bool {
     for (name, thread) in threads {
         match tokio::task::spawn_blocking(move || thread.join()).await {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                error!(thread = name, "thread panicked");
+            Ok(Err(payload)) => {
+                let reason = panic_message(payload.as_ref());
+                error!(thread = name, reason, "thread panicked");
                 clean = false;
             }
             Err(err) => {
@@ -96,6 +98,16 @@ async fn join_threads(threads: Vec<(&'static str, JoinHandle<()>)>) -> bool {
     clean
 }
 
+/// The message a panic was raised with: a `panic!` with only a literal carries
+/// a `&str`, one with format arguments a `String`.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -104,6 +116,23 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn the_panic_message_is_read_from_either_payload() {
+        let literal = thread::spawn(|| panic!("literal")).join();
+        // A runtime argument: constant ones are folded into a `&str` payload.
+        let seq = std::hint::black_box(7);
+        let formatted = thread::spawn(move || panic!("formatted {seq}")).join();
+        let other = thread::spawn(|| std::panic::panic_any(7_u8)).join();
+        for (payload, message) in [
+            (literal, "literal"),
+            (formatted, "formatted 7"),
+            (other, "no message"),
+        ] {
+            let payload = payload.expect_err("the thread panics");
+            assert_eq!(panic_message(payload.as_ref()), message);
+        }
+    }
 
     #[tokio::test]
     async fn threads_that_end_normally_join_cleanly() {
