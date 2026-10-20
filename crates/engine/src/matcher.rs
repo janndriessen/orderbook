@@ -59,8 +59,15 @@ impl SequencedMatcher {
 /// sends the resulting events to `events`. It stops once `commands` is closed
 /// and drained, or as soon as a send fails because the receiving end of
 /// `events` is gone; while it waits for a command it cannot notice that.
-/// Either way the command receiver is dropped with it, which tells the sender
-/// to stop.
+///
+/// It also stops, with a panic and before matching it, at a command whose
+/// `seq` is not the one after the previous command's, starting from 1:
+/// matching input other than the sequence the gateway numbered could leave a
+/// book that no replay reproduces. The events of the commands matched before
+/// are still delivered.
+///
+/// In every case the command receiver is dropped with the thread, which tells
+/// the sender to stop.
 pub fn spawn(
     mut commands: mpsc::Receiver<Envelope<Command>>,
     events: mpsc::Sender<Envelope<Event>>,
@@ -68,7 +75,13 @@ pub fn spawn(
     thread::Builder::new().name("engine".into()).spawn(move || {
         info!("engine started");
         let mut matcher = SequencedMatcher::new();
+        let mut next_seq: Seq = 1;
         'run: while let Some(command) = commands.blocking_recv() {
+            assert_eq!(
+                command.seq, next_seq,
+                "the command sequence has a gap or is out of order"
+            );
+            next_seq += 1;
             for envelope in matcher.apply(command.ts, command.body) {
                 // A full queue blocks here: backpressure, never a dropped event.
                 if events.blocking_send(envelope).is_err() {
@@ -164,8 +177,9 @@ mod tests {
             .collect()
     }
 
-    /// Waits for the thread to end, failing instead of hanging.
-    async fn join(handle: JoinHandle<()>) {
+    /// Waits for the thread to end, failing instead of hanging, and returns
+    /// whether it panicked.
+    async fn finish(handle: JoinHandle<()>) -> thread::Result<()> {
         timeout(WAIT, async {
             while !handle.is_finished() {
                 sleep(Duration::from_millis(5)).await;
@@ -173,7 +187,12 @@ mod tests {
         })
         .await
         .expect("engine thread stops");
-        handle.join().expect("engine thread does not panic");
+        handle.join()
+    }
+
+    /// Waits for the thread to end normally.
+    async fn join(handle: JoinHandle<()>) {
+        finish(handle).await.expect("engine thread does not panic");
     }
 
     async fn next(events: &mut mpsc::Receiver<Envelope<Event>>) -> Envelope<Event> {
@@ -258,5 +277,39 @@ mod tests {
         }
         drop(command_tx);
         join(thread).await;
+    }
+
+    #[tokio::test]
+    async fn an_out_of_sequence_command_stops_the_thread_with_a_panic() {
+        // Each case: the seqs sent, and how many commands are matched before
+        // the one out of sequence.
+        for (seqs, matched) in [(vec![1, 3], 1), (vec![1, 1], 1), (vec![2], 0)] {
+            let (command_tx, command_rx) = mpsc::channel(8);
+            let (event_tx, mut events) = mpsc::channel(64);
+            let thread = spawn(command_rx, event_tx).expect("thread starts");
+            for (&seq, (ts, body)) in seqs.iter().zip(commands()) {
+                let envelope = Envelope { seq, ts, body };
+                command_tx.send(envelope).await.expect("queue has room");
+            }
+
+            let mut reference = SequencedMatcher::new();
+            for (ts, body) in commands().into_iter().take(matched) {
+                for want in &reference.apply(ts, body) {
+                    assert_eq!(&next(&mut events).await, want);
+                }
+            }
+            let payload = finish(thread).await.expect_err("the thread panics");
+            let message = payload
+                .downcast_ref::<String>()
+                .expect("the panic has a formatted message");
+            assert!(
+                message.contains("gap or is out of order"),
+                "{seqs:?}: {message}"
+            );
+            assert!(
+                events.recv().await.is_none(),
+                "{seqs:?}: the out-of-sequence command is not matched"
+            );
+        }
     }
 }
