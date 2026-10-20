@@ -95,3 +95,46 @@ async fn join_threads(threads: Vec<(&'static str, JoinHandle<()>)>) -> bool {
     }
     clean
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn threads_that_end_normally_join_cleanly() {
+        let threads = vec![
+            ("first", thread::spawn(|| {})),
+            ("second", thread::spawn(|| {})),
+        ];
+        assert!(join_threads(threads).await);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_thread_is_reported_and_the_rest_are_still_joined() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let slow = {
+            let finished = Arc::clone(&finished);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                finished.store(true, Ordering::SeqCst);
+            })
+        };
+        let threads = vec![
+            (
+                "panicked",
+                thread::spawn(|| panic!("deliberate panic in a test thread")),
+            ),
+            ("slow", slow),
+        ];
+        assert!(!join_threads(threads).await);
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the thread after the panicked one was joined"
+        );
+    }
+}
