@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use matching::Matcher;
-use protocol::{Command, Event};
-use serde_json::Value;
+use protocol::Command;
+use serde_json::{Map, Value};
 
 fn scenario_files() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
@@ -19,50 +19,78 @@ fn scenario_files() -> Vec<PathBuf> {
     files
 }
 
-fn json_line(event: &Event) -> String {
-    serde_json::to_string(event).expect("events serialize")
-}
-
 /// One line per event position: unchanged ones with a space, differing ones as
 /// an expected (`-`) and an actual (`+`) line.
-fn diff(expected: &[Event], actual: &[Event]) -> String {
+fn diff(expected: &[Value], actual: &[Value]) -> String {
     let mut lines = Vec::new();
     for i in 0..expected.len().max(actual.len()) {
         match (expected.get(i), actual.get(i)) {
-            (Some(e), Some(a)) if e == a => lines.push(format!("  {}", json_line(e))),
+            (Some(e), Some(a)) if e == a => lines.push(format!("  {e}")),
             (e, a) => {
-                lines.extend(e.map(|e| format!("- {}", json_line(e))));
-                lines.extend(a.map(|a| format!("+ {}", json_line(a))));
+                lines.extend(e.map(|e| format!("- {e}")));
+                lines.extend(a.map(|a| format!("+ {a}")));
             }
         }
     }
     lines.join("\n")
 }
 
-/// Runs the scenario in `text`; the error names the failing step.
+/// Fails if `object` has a key outside `allowed`.
+fn only_keys(object: &Map<String, Value>, allowed: &[&str], what: &str) -> Result<(), String> {
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(format!("{what} has an unknown key `{key}`")),
+        None => Ok(()),
+    }
+}
+
+/// Runs the scenario in `text`; the error names the failing step, counted from 1.
+///
+/// Each command is printed before it runs, so a panic inside the matcher (an
+/// input the gateway would have refused) still shows the step in the captured
+/// output of the failing test.
 fn run(text: &str) -> Result<(), String> {
     let scenario: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
-    if !scenario["description"]
-        .as_str()
+    let scenario = scenario.as_object().ok_or("a scenario must be an object")?;
+    only_keys(scenario, &["description", "steps"], "the scenario")?;
+    if !scenario
+        .get("description")
+        .and_then(Value::as_str)
         .is_some_and(|d| !d.is_empty())
     {
         return Err("`description` must be a non-empty string".into());
     }
-    let steps = scenario["steps"]
-        .as_array()
+    let steps = scenario
+        .get("steps")
+        .and_then(Value::as_array)
         .ok_or("`steps` must be an array")?;
+    if steps.is_empty() {
+        return Err("`steps` must have at least one step".into());
+    }
     let mut matcher = Matcher::new();
     for (index, step) in steps.iter().enumerate() {
-        let at = |message: String| format!("step {index}: {message}");
-        let command: Command = serde_json::from_value(step["command"].clone())
-            .map_err(|e| at(format!("invalid command: {e}")))?;
-        let expected: Vec<Event> = serde_json::from_value(step["events"].clone())
-            .map_err(|e| at(format!("invalid events: {e}")))?;
-        let actual = matcher.apply(command);
-        if actual != expected {
+        let number = index + 1;
+        let at = |message: String| format!("step {number}: {message}");
+        let step = step
+            .as_object()
+            .ok_or_else(|| at("a step must be an object".into()))?;
+        only_keys(step, &["command", "events"], &at("the step".into()))?;
+        let command: Command =
+            serde_json::from_value(step.get("command").cloned().unwrap_or(Value::Null))
+                .map_err(|e| at(format!("invalid command: {e}")))?;
+        let expected = step
+            .get("events")
+            .and_then(Value::as_array)
+            .ok_or_else(|| at("`events` must be an array".into()))?;
+        println!("step {number}: {command:?}");
+        let actual: Vec<Value> = matcher
+            .apply(command)
+            .iter()
+            .map(|event| serde_json::to_value(event).expect("events serialize"))
+            .collect();
+        if actual != *expected {
             return Err(at(format!(
                 "events differ for {command:?} (- expected, + actual)\n{}",
-                diff(&expected, &actual)
+                diff(expected, &actual)
             )));
         }
     }
@@ -81,6 +109,7 @@ fn every_scenario_file_produces_its_expected_events() {
                 .file_name()
                 .expect("files have names")
                 .to_string_lossy();
+            println!("{name}");
             run(&text).err().map(|e| format!("{name}, {e}"))
         })
         .collect();
@@ -111,10 +140,13 @@ fn a_mismatch_names_the_step_and_shows_the_differing_events() {
         ]
     }"#;
     let error = run(scenario).unwrap_err();
-    assert!(error.starts_with("step 1: events differ"), "{error}");
-    assert!(error.contains("  {\"type\":\"canceled\""), "{error}");
-    assert!(error.contains("- {\"type\":\"l2_update\",\"side\":\"buy\",\"price\":100,\"qty\":1}"));
-    assert!(error.contains("+ {\"type\":\"l2_update\",\"side\":\"buy\",\"price\":100,\"qty\":0}"));
+    assert!(error.starts_with("step 2: events differ"), "{error}");
+    assert!(
+        error.contains("  {\"leaves_qty\":5,\"order_id\":1,\"type\":\"canceled\"}"),
+        "{error}"
+    );
+    assert!(error.contains("- {\"price\":100,\"qty\":1,\"side\":\"buy\",\"type\":\"l2_update\"}"));
+    assert!(error.contains("+ {\"price\":100,\"qty\":0,\"side\":\"buy\",\"type\":\"l2_update\"}"));
 }
 
 #[test]
@@ -126,6 +158,48 @@ fn an_unknown_command_field_is_rejected() {
         ]
     }"#;
     let error = run(scenario).unwrap_err();
-    assert!(error.starts_with("step 0: invalid command"), "{error}");
+    assert!(error.starts_with("step 1: invalid command"), "{error}");
     assert!(error.contains("unknown field `qty`"), "{error}");
+}
+
+const PLACE: &str = r#"{ "type": "place", "order_id": 1, "side": "buy",
+    "order_type": { "type": "limit", "price": 100, "time_in_force": "gtc" }, "qty": 5 }"#;
+
+fn accepted(extra: &str) -> String {
+    format!(
+        r#"{{ "type": "accepted", "order_id": 1, "side": "buy", "qty": 5{extra},
+            "order_type": {{ "type": "limit", "price": 100, "time_in_force": "gtc" }} }}"#
+    )
+}
+
+fn one_step(events: &str) -> String {
+    format!(
+        r#"{{ "description": "d", "steps": [ {{ "command": {PLACE}, "events": [{events}] }} ] }}"#
+    )
+}
+
+#[test]
+fn a_stray_field_in_an_expected_event_fails() {
+    let level = r#"{ "type": "l2_update", "side": "buy", "price": 100, "qty": 5 }"#;
+    let ok = one_step(&format!("{}, {level}", accepted("")));
+    assert_eq!(run(&ok), Ok(()));
+    let stray = one_step(&format!("{}, {level}", accepted(r#", "extra": 1"#)));
+    let error = run(&stray).unwrap_err();
+    assert!(error.starts_with("step 1: events differ"), "{error}");
+}
+
+#[test]
+fn a_scenario_without_steps_is_rejected() {
+    let error = run(r#"{ "description": "d", "steps": [] }"#).unwrap_err();
+    assert!(error.contains("at least one step"), "{error}");
+}
+
+#[test]
+fn unknown_scenario_and_step_keys_are_rejected() {
+    let error = run(r#"{ "description": "d", "steps": [], "note": "x" }"#).unwrap_err();
+    assert_eq!(error, "the scenario has an unknown key `note`");
+    let step = r#"{ "description": "d", "steps": [
+        { "command": { "type": "cancel", "order_id": 1 }, "events": [], "comment": "x" } ] }"#;
+    let error = run(step).unwrap_err();
+    assert_eq!(error, "step 1: the step has an unknown key `comment`");
 }
