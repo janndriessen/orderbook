@@ -1,10 +1,10 @@
-//! Matching of incoming limit orders against the book.
+//! Matching of incoming limit and market orders against the book.
 
 use protocol::{Event, OrderId, OrderType, Price, Qty, RejectReason, Side, TimeInForce};
 
 use crate::{OrderBook, RestingOrder};
 
-/// An order book plus the matching of incoming limit orders.
+/// An order book plus the matching of incoming limit and market orders.
 #[derive(Debug, Default)]
 pub struct Matcher {
     book: OrderBook,
@@ -51,7 +51,7 @@ impl Matcher {
             TimeInForce::Gtc => true,
             TimeInForce::Ioc => false,
             TimeInForce::PostOnly => {
-                if self.crosses(side, price) {
+                if self.crosses(side, Some(price)) {
                     return vec![Event::Rejected {
                         order_id,
                         reason: RejectReason::PostOnlyWouldCross,
@@ -69,30 +69,7 @@ impl Matcher {
             },
             qty,
         }];
-        let opposite = match side {
-            Side::Buy => Side::Sell,
-            Side::Sell => Side::Buy,
-        };
-        let mut touched = Vec::new();
-        let mut remaining = qty;
-        while remaining > 0 && self.crosses(side, price) {
-            let fill = self
-                .book
-                .fill_best(opposite, remaining)
-                .expect("crosses() saw a best price on the opposite side");
-            remaining -= fill.qty;
-            events.push(Event::Trade {
-                maker_order_id: fill.maker_order_id,
-                taker_order_id: order_id,
-                aggressor_side: side,
-                price: fill.price,
-                qty: fill.qty,
-            });
-            // Consumption is monotone in price, so a repeat is always the last entry.
-            if touched.last() != Some(&fill.price) {
-                touched.push(fill.price);
-            }
-        }
+        let (remaining, touched) = self.take(order_id, side, Some(price), qty, &mut events);
         if remaining > 0 && !rests {
             events.push(Event::Canceled {
                 order_id,
@@ -100,7 +77,7 @@ impl Matcher {
             });
         }
         for level_price in touched {
-            events.push(self.level_update(opposite, level_price));
+            events.push(self.level_update(opposite(side), level_price));
         }
         if remaining > 0 && rests {
             let resting = RestingOrder {
@@ -117,11 +94,91 @@ impl Matcher {
         events
     }
 
-    /// Whether the best opposite price trades with a limit order at `price`.
-    fn crosses(&self, side: Side, price: Price) -> bool {
-        match side {
-            Side::Buy => self.book.best_ask().is_some_and(|ask| ask <= price),
-            Side::Sell => self.book.best_bid().is_some_and(|bid| bid >= price),
+    /// Matches a market order against the opposite side at any price.
+    ///
+    /// If the opposite side is empty the order is rejected with `NoLiquidity`
+    /// and nothing else happens. Otherwise the events are `Accepted`, one
+    /// `Trade` per fill, `Canceled` for whatever the book could not fill, then
+    /// one `L2Update` per consumed level. A market order never rests, and it
+    /// has no price protection: it takes every level it needs.
+    ///
+    /// # Panics
+    ///
+    /// If `qty` is zero, or `order_id` is already resting; the gateway's
+    /// stateless checks rule both out.
+    pub fn place_market(&mut self, order_id: OrderId, side: Side, qty: Qty) -> Vec<Event> {
+        assert!(qty > 0, "orders have a positive quantity");
+        assert!(
+            !self.book.contains(order_id),
+            "the gateway rejects order ids that are already resting"
+        );
+        if !self.crosses(side, None) {
+            return vec![Event::Rejected {
+                order_id,
+                reason: RejectReason::NoLiquidity,
+            }];
+        }
+        let mut events = vec![Event::Accepted {
+            order_id,
+            side,
+            order_type: OrderType::Market {},
+            qty,
+        }];
+        let (remaining, touched) = self.take(order_id, side, None, qty, &mut events);
+        if remaining > 0 {
+            events.push(Event::Canceled {
+                order_id,
+                leaves_qty: remaining,
+            });
+        }
+        for level_price in touched {
+            events.push(self.level_update(opposite(side), level_price));
+        }
+        events
+    }
+
+    /// Fills up to `qty` against the opposite side while its best price
+    /// trades with `limit` (any price if `None`), pushing one `Trade` per
+    /// fill. Returns the unfilled quantity and the consumed prices in order.
+    fn take(
+        &mut self,
+        order_id: OrderId,
+        side: Side,
+        limit: Option<Price>,
+        qty: Qty,
+        events: &mut Vec<Event>,
+    ) -> (Qty, Vec<Price>) {
+        let mut touched = Vec::new();
+        let mut remaining = qty;
+        while remaining > 0 && self.crosses(side, limit) {
+            let fill = self
+                .book
+                .fill_best(opposite(side), remaining)
+                .expect("crosses() saw a best price on the opposite side");
+            remaining -= fill.qty;
+            events.push(Event::Trade {
+                maker_order_id: fill.maker_order_id,
+                taker_order_id: order_id,
+                aggressor_side: side,
+                price: fill.price,
+                qty: fill.qty,
+            });
+            // Consumption is monotone in price, so a repeat is always the last entry.
+            if touched.last() != Some(&fill.price) {
+                touched.push(fill.price);
+            }
+        }
+        (remaining, touched)
+    }
+
+    /// Whether the best opposite price trades with an order on `side` limited
+    /// to `limit`; with no limit, whether the opposite side has any order.
+    fn crosses(&self, side: Side, limit: Option<Price>) -> bool {
+        match (side, limit) {
+            (Side::Buy, None) => self.book.best_ask().is_some(),
+            (Side::Sell, None) => self.book.best_bid().is_some(),
+            (Side::Buy, Some(p)) => self.book.best_ask().is_some_and(|ask| ask <= p),
+            (Side::Sell, Some(p)) => self.book.best_bid().is_some_and(|bid| bid >= p),
         }
     }
 
@@ -131,6 +188,13 @@ impl Matcher {
             .level(side, price)
             .map_or(0, |level| level.total());
         Event::L2Update { side, price, qty }
+    }
+}
+
+fn opposite(side: Side) -> Side {
+    match side {
+        Side::Buy => Side::Sell,
+        Side::Sell => Side::Buy,
     }
 }
 
@@ -440,6 +504,119 @@ mod tests {
         );
     }
 
+    fn accepted_market(order_id: OrderId, side: Side, qty: Qty) -> Event {
+        let order_type = OrderType::Market {};
+        Event::Accepted {
+            order_id,
+            side,
+            order_type,
+            qty,
+        }
+    }
+
+    #[test]
+    fn market_buy_fills_within_one_level() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        assert_eq!(
+            m.place_market(2, Side::Buy, 3),
+            [
+                accepted_market(2, Side::Buy, 3),
+                trade(1, 2, Side::Buy, 100, 3),
+                l2(Side::Sell, 100, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn market_sell_sweeps_bids_in_price_time_order() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 99, Gtc, 4);
+        m.place_limit(2, Side::Buy, 100, Gtc, 2);
+        m.place_limit(3, Side::Buy, 100, Gtc, 2);
+        assert_eq!(
+            m.place_market(4, Side::Sell, 7),
+            [
+                accepted_market(4, Side::Sell, 7),
+                trade(2, 4, Side::Sell, 100, 2),
+                trade(3, 4, Side::Sell, 100, 2),
+                trade(1, 4, Side::Sell, 99, 3),
+                l2(Side::Buy, 100, 0),
+                l2(Side::Buy, 99, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn market_larger_than_the_book_cancels_the_remainder() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 2);
+        m.place_limit(2, Side::Sell, 101, Gtc, 3);
+        assert_eq!(
+            m.place_market(3, Side::Buy, 9),
+            [
+                accepted_market(3, Side::Buy, 9),
+                trade(1, 3, Side::Buy, 100, 2),
+                trade(2, 3, Side::Buy, 101, 3),
+                Event::Canceled {
+                    order_id: 3,
+                    leaves_qty: 4
+                },
+                l2(Side::Sell, 100, 0),
+                l2(Side::Sell, 101, 0),
+            ]
+        );
+        assert_eq!((m.book.best_bid(), m.book.best_ask()), (None, None));
+    }
+
+    #[test]
+    fn market_against_an_empty_side_is_rejected() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 100, Gtc, 5);
+        let reason = RejectReason::NoLiquidity;
+        assert_eq!(
+            m.place_market(2, Side::Buy, 3),
+            [Event::Rejected {
+                order_id: 2,
+                reason
+            }]
+        );
+        assert_eq!((m.book.best_bid(), m.book.best_ask()), (Some(100), None));
+        assert_eq!(m.book.level(Side::Buy, 100).map(|l| l.total()), Some(5));
+    }
+
+    #[test]
+    fn market_equal_to_the_depth_empties_the_side_without_cancel() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 2);
+        m.place_limit(2, Side::Sell, 101, Gtc, 3);
+        assert_eq!(
+            m.place_market(3, Side::Buy, 5),
+            [
+                accepted_market(3, Side::Buy, 5),
+                trade(1, 3, Side::Buy, 100, 2),
+                trade(2, 3, Side::Buy, 101, 3),
+                l2(Side::Sell, 100, 0),
+                l2(Side::Sell, 101, 0),
+            ]
+        );
+        assert_eq!(m.book.best_ask(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "already resting")]
+    fn market_duplicate_id_panics_even_on_an_empty_side() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 100, Gtc, 5);
+        m.place_market(1, Side::Buy, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive quantity")]
+    fn market_zero_quantity_panics_even_on_an_empty_side() {
+        Matcher::new().place_market(1, Side::Buy, 0);
+    }
+
     #[test]
     fn same_orders_give_identical_events() {
         let run = || {
@@ -451,7 +628,11 @@ mod tests {
                 (4, Side::Buy, 99, 5),
                 (5, Side::Sell, 99, 7),
             ];
-            orders.map(|(id, side, price, qty)| m.place_limit(id, side, price, Gtc, qty))
+            let mut events = orders
+                .map(|(id, side, price, qty)| m.place_limit(id, side, price, Gtc, qty))
+                .to_vec();
+            events.push(m.place_market(6, Side::Buy, 10));
+            events
         };
         assert_eq!(run(), run());
     }

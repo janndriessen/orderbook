@@ -8,7 +8,8 @@ use crate::{OrderId, OrderType, Price, Qty, Side};
 ///
 /// One command can produce several events: an aggressive order produces
 /// `Accepted`, one `Trade` per matched maker, `Canceled` if an
-/// immediate-or-cancel remainder is left, and the resulting `L2Update`s.
+/// immediate-or-cancel or market remainder is left, and the resulting
+/// `L2Update`s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -64,8 +65,8 @@ pub enum Event {
     },
     /// An order, or its unfilled remainder, was canceled.
     ///
-    /// An immediate-or-cancel order reports its remainder this way, possibly
-    /// after partial fills.
+    /// An immediate-or-cancel or market order reports its remainder this way,
+    /// possibly after partial fills.
     Canceled {
         /// The canceled order.
         order_id: OrderId,

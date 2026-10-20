@@ -8,7 +8,8 @@ import type { Side } from "./Side";
  *
  * One command can produce several events: an aggressive order produces
  * `Accepted`, one `Trade` per matched maker, `Canceled` if an
- * immediate-or-cancel remainder is left, and the resulting `L2Update`s.
+ * immediate-or-cancel or market remainder is left, and the resulting
+ * `L2Update`s.
  */
 export type Event = {
   "type": "accepted";

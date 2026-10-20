@@ -4,7 +4,7 @@
 //! so no async runtime or network crate can reach the matching path. Keeping
 //! out other I/O, such as std `fs` and clocks, is up to review.
 //!
-//! It holds the order book and the matching of good-till-cancel limit orders.
+//! It holds the order book and the matching of limit and market orders.
 
 mod book;
 mod matching;
