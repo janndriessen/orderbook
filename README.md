@@ -35,7 +35,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `CancelRejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
-- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority; cancel and replace are not there yet
+- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel of resting orders; replace is not there yet
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
@@ -70,7 +70,7 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 
 ```
 crates/protocol/   shared message format; source of the TypeScript types
-crates/matching/   order book and limit- and market-order matching: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
+crates/matching/   order book, limit- and market-order matching and cancel: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
 crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 docs/              diagrams
