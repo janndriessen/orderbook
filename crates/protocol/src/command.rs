@@ -6,9 +6,10 @@
 //! Parsing is strict: unknown fields are rejected, so neither the Rust types
 //! nor the wire can express a priced market order or a mistagged command.
 //!
-//! The types do not validate values. A zero quantity or a non-positive price
-//! is rejected by the gateway's stateless checks, and a command that names an
-//! unknown order by the engine.
+//! The types do not validate values. Out-of-range quantities, prices and
+//! order ids, and reused order ids, are rejected by the gateway, which needs no
+//! book state for that; a command that names an unknown order is rejected by
+//! the engine.
 
 use serde::{Deserialize, Serialize};
 

@@ -55,20 +55,21 @@ impl SequencedMatcher {
 /// Starts the engine thread.
 ///
 /// The thread owns a [`SequencedMatcher`], runs every command from `commands`
-/// through it in arrival order and sends the resulting events to `events`. It
-/// stops once `commands` is closed and drained, or as soon as a send fails
-/// because the receiving end of `events` is gone; while it waits for a command
-/// it cannot notice that. Either way the command receiver is dropped with it,
-/// which tells the sender to stop.
+/// through it in arrival order, stamped with the envelope's venue time, and
+/// sends the resulting events to `events`. It stops once `commands` is closed
+/// and drained, or as soon as a send fails because the receiving end of
+/// `events` is gone; while it waits for a command it cannot notice that.
+/// Either way the command receiver is dropped with it, which tells the sender
+/// to stop.
 pub fn spawn(
-    mut commands: mpsc::Receiver<(Ts, Command)>,
+    mut commands: mpsc::Receiver<Envelope<Command>>,
     events: mpsc::Sender<Envelope<Event>>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().name("engine".into()).spawn(move || {
         info!("engine started");
         let mut matcher = SequencedMatcher::new();
-        'run: while let Some((ts, command)) = commands.blocking_recv() {
-            for envelope in matcher.apply(ts, command) {
+        'run: while let Some(command) = commands.blocking_recv() {
+            for envelope in matcher.apply(command.ts, command.body) {
                 // A full queue blocks here: backpressure, never a dropped event.
                 if events.blocking_send(envelope).is_err() {
                     break 'run;
@@ -108,6 +109,14 @@ mod tests {
             (2_500, limit(2, Side::Sell, 100, 8, TimeInForce::Ioc)),
             (2_500, Command::Cancel { order_id: 1 }),
         ]
+    }
+
+    /// `commands()` as the gateway would hand them over, numbered from 1.
+    fn envelopes() -> Vec<Envelope<Command>> {
+        (1..)
+            .zip(commands())
+            .map(|(seq, (ts, body))| Envelope { seq, ts, body })
+            .collect()
     }
 
     #[test]
@@ -179,7 +188,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut events) = mpsc::channel(64);
         let thread = spawn(command_rx, event_tx).expect("thread starts");
-        for command in commands() {
+        for command in envelopes() {
             command_tx.send(command).await.expect("engine is running");
         }
 
@@ -196,7 +205,7 @@ mod tests {
     async fn closing_the_command_queue_delivers_what_is_queued_then_stops() {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut events) = mpsc::channel(64);
-        for command in commands() {
+        for command in envelopes() {
             command_tx.send(command).await.expect("queue has room");
         }
         drop(command_tx);
@@ -217,7 +226,7 @@ mod tests {
         let thread = spawn(command_rx, event_tx).expect("thread starts");
 
         drop(events);
-        let [first, ..] = commands();
+        let first = envelopes().remove(0);
         command_tx.send(first).await.expect("engine is running");
 
         join(thread).await;
@@ -229,7 +238,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut events) = mpsc::channel(1);
         let thread = spawn(command_rx, event_tx).expect("thread starts");
-        for command in commands() {
+        for command in envelopes() {
             command_tx.send(command).await.expect("engine is running");
         }
         // Nobody reads until the first event fills the one-slot queue, so the

@@ -2,7 +2,7 @@
 
 An exchange-style order book service and matching engine for a single market (BTC-USD), driven by order flow derived from Hyperliquid data. A full-screen web UI visualizes the live book and a log of the events that produced it. The project mirrors how real venues are built and documents where it deliberately does not.
 
-> Early stage: the protocol, the matching crate, a live feed driven by random-walk order flow through the matcher, and the web UI exist so far. See [Status](#status).
+> Early stage: the protocol, the matching crate, a live feed driven by random-walk order flow through the gateway and the matcher, and the web UI exist so far. See [Status](#status).
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
 - [x] The `matching` crate runs alone on its own engine thread, driven by random-walk order flow from the source thread through a bounded command queue
-- [ ] Gateway that validates and sequences commands in front of the engine thread
+- [x] Gateway that validates and sequences commands in front of the engine thread: checks that need no book state (bounds of order size, price and order id, and order id reuse), then gap-free command sequence numbers
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
 - [ ] Hyperliquid adapter and replayer
@@ -73,26 +73,27 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 ```
 crates/protocol/   shared message format; source of the TypeScript types
 crates/matching/   order book, limit- and market-order matching, cancel and replace: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
-crates/engine/     order book service: random-walk order flow, matcher on its own thread, publisher, WebSocket feed
+crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
 ```
 
-Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness` and `data/` (recorded sessions, gitignored).
+Planned, not yet present: `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness` and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
 - **Replication:** a single engine instance. Production runs several identical replicas kept in sync by a consensus protocol such as Raft, for instant failover.
 - **Persistence:** no journal or snapshots; state is lost on restart. Production journals every input and snapshots the book for fast recovery.
 - **Markets:** one market (BTC-USD). Production shards many markets across engines, each on a pinned CPU core.
-- **Gateways:** one simple gateway with stateless checks only. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
+- **Gateways:** one simple gateway whose checks need no book state. Production runs many gateways with authentication, rate limits and risk checks, feeding a central sequencer.
+- **Gateway rejects:** a rejected command is logged on the submitting thread and never reaches the event stream or the public feed; production gateways answer the sender privately. The set of used order ids grows until restart; production venues scope ids to a trading day.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
-- **Price protection:** market orders have no protection, so on a thin book one can sweep far through the levels. Production venues add price bands or protection limits.
+- **Price protection:** market orders have no protection, so on a thin book one can sweep far through the levels. Production venues add price bands or protection limits. Limit prices have no bands either: the gateway only checks that a price is positive and below 2^53, while production venues reject limit prices too far from a reference price, which needs book state.
 - **Order types:** market orders trade immediately at any price, cancel any remainder and are rejected on an empty opposite side. Limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced). A replace that changes the price or grows the quantity is a cancel followed by a new arrival: it loses time priority, and if the new price crosses it trades, except that a post-only order is refused instead. The `qty` of a replace is the new open quantity, not the total order size including fills; production venues differ on this. There is no fill-or-kill, stop or iceberg.
-- **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids.
+- **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids in the engine, which answers cancels; the gateway keeps such a record but never sees whether an order filled.
 - **Order flow:** a seeded random walk generates the commands: GTC limits around the touch, cancels, replaces and IOC takers that never exceed the touch, which the real matcher turns into events. It therefore never produces a `Canceled` IOC remainder or a reject.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
 - **Dead clients:** the server drops a vanished client once its writes, at least one per second, back up and hit the send timeout, typically within tens of seconds. Production servers also send WebSocket pings to detect them within a fixed interval.

@@ -1,17 +1,19 @@
 //! Random-walk order flow on its own OS thread.
 //!
 //! The walk produces commands with venue timestamps; the thread paces itself
-//! to the walk's clock, runs outside Tokio, and hands the commands to the
-//! engine through a bounded queue.
+//! to the walk's clock, runs outside Tokio, passes every command through the
+//! gateway and hands the ones that pass to the engine through a bounded queue.
 
 mod book;
 mod walk;
 
 use std::thread::{self, JoinHandle};
 
-use protocol::{Command, Ts};
+use protocol::{Command, Envelope, Ts};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+use crate::gateway::Gateway;
 
 pub use walk::RandomWalk;
 
@@ -27,20 +29,28 @@ pub const COMMAND_QUEUE_CAPACITY: usize = 1024;
 
 /// Starts the source thread.
 ///
-/// The thread sends the walk's commands, with their venue times, to `queue`
-/// and paces itself to the walk's venue clock. It stops when the receiving
-/// end of the queue is dropped.
+/// The thread submits the walk's commands, with their venue times, to its own
+/// [`Gateway`] and sends those that pass to `queue` as numbered envelopes. A
+/// rejected command is logged and dropped; it never enters the event stream. The thread paces itself
+/// to the walk's venue clock and stops when the receiving end of the queue is
+/// dropped.
 pub fn spawn(
     mut walk: RandomWalk,
-    queue: mpsc::Sender<(Ts, Command)>,
+    queue: mpsc::Sender<Envelope<Command>>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().name("source".into()).spawn(move || {
         info!("source started");
+        let mut gateway = Gateway::new();
         loop {
             let step = walk.step();
-            // A full queue blocks here: backpressure, never a dropped command.
-            if queue.blocking_send((step.ts, step.command)).is_err() {
-                break;
+            match gateway.submit(step.ts, step.command) {
+                // A full queue blocks here: backpressure, never a dropped command.
+                Ok(envelope) => {
+                    if queue.blocking_send(envelope).is_err() {
+                        break;
+                    }
+                }
+                Err(reject) => warn!(%reject, command = ?step.command, "gateway rejected command"),
             }
             thread::sleep(step.wait);
         }

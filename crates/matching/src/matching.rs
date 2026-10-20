@@ -70,8 +70,8 @@ impl Matcher {
     ///
     /// # Panics
     ///
-    /// If `qty` is zero, or `order_id` is already resting; the gateway's
-    /// stateless checks rule both out.
+    /// If `qty` is zero, or `order_id` is already resting; the gateway's checks
+    /// rule both out.
     pub fn place_limit(
         &mut self,
         order_id: OrderId,
@@ -143,8 +143,8 @@ impl Matcher {
     ///
     /// # Panics
     ///
-    /// If `qty` is zero, or `order_id` is already resting; the gateway's
-    /// stateless checks rule both out.
+    /// If `qty` is zero, or `order_id` is already resting; the gateway's checks
+    /// rule both out.
     pub fn place_market(&mut self, order_id: OrderId, side: Side, qty: Qty) -> Vec<Event> {
         assert!(qty > 0, "orders have a positive quantity");
         assert!(
@@ -220,7 +220,7 @@ impl Matcher {
     ///
     /// # Panics
     ///
-    /// If `qty` is zero; the gateway's stateless checks rule that out.
+    /// If `qty` is zero; the gateway's checks rule that out.
     pub fn replace(&mut self, order_id: OrderId, price: Price, qty: Qty) -> Vec<Event> {
         assert!(qty > 0, "orders have a positive quantity");
         let refuse = |reason| {
