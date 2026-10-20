@@ -5,7 +5,10 @@
 //! out other I/O, such as std `fs` and clocks, is up to review.
 //!
 //! It holds the order book, the matching of limit and market orders, and the
-//! cancel and replace of resting orders.
+//! cancel and replace of resting orders. `Matcher::apply` runs a `Command`.
+//!
+//! The hand-written scenarios in the top-level `scenarios/` directory run
+//! against it as part of this crate's tests.
 
 mod book;
 mod matching;

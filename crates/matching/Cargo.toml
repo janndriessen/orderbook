@@ -10,5 +10,8 @@ description = "Order book and matching: pure in-memory logic with no I/O."
 protocol.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

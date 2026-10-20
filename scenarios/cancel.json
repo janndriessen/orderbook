@@ -1,0 +1,38 @@
+{
+  "description": "Canceling a resting order frees its quantity; canceling it again, or an id never seen, is refused.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 2},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 2},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 2}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 5}
+      ]
+    },
+    {
+      "command": {"type": "cancel", "order_id": 1},
+      "events": [
+        {"type": "canceled", "order_id": 1, "leaves_qty": 2},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 3}
+      ]
+    },
+    {
+      "command": {"type": "cancel", "order_id": 1},
+      "events": [
+        {"type": "cancel_rejected", "order_id": 1, "response_to": "cancel", "reason": "unknown_order"}
+      ]
+    },
+    {
+      "command": {"type": "cancel", "order_id": 9},
+      "events": [
+        {"type": "cancel_rejected", "order_id": 9, "response_to": "cancel", "reason": "unknown_order"}
+      ]
+    }
+  ]
+}

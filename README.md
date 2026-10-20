@@ -36,7 +36,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
-- [ ] Matching engine and hand-written scenarios
+- [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
+- [ ] Matching engine in the service (the random-walk source still stands in for it)
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
 - [ ] Hyperliquid adapter and replayer
@@ -73,10 +74,11 @@ crates/protocol/   shared message format; source of the TypeScript types
 crates/matching/   order book, limit- and market-order matching, cancel and replace: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
 crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
+scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
 ```
 
-Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness`, `scenarios/` (hand-written test cases) and `data/` (recorded sessions, gitignored).
+Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `crates/replayer`, `crates/generator`, `crates/harness` and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
