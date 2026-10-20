@@ -62,7 +62,7 @@ Every task, code or not, ends in a check that could have failed. "Done" means th
 - **Name the check first.** The plan says what will show success or failure: a test, a command, a measurement, or an artifact. If no check can be named, the task is unclear; ask.
 - **Ask when the check needs the developer.** How the UI should look and feel is the developer's call; agree on it before declaring success.
 - **End with evidence.** The summary lists the commands run and what they returned (exit status, counts, numbers), split into **Verified** (observed in this session) and **Assumed** (not checked, and why). A subagent's report is assumed until its evidence is seen.
-- **Red before green.** Watch every new or changed test fail without the change (revert it, or break the line it guards), then pass with it. A bug fix starts from a failing test that reproduces the bug.
+- **Red before green.** Watch every new or changed test fail without the change (revert it, or break the line it guards), then pass with it. A bug fix starts from a failing test that reproduces the bug. Make deliberate breaks in a throwaway copy (e.g. a `git worktree`), never in the working tree, so a failed restore can't leave a break behind.
 - **Check the checks.** Expected values and thresholds can be wrong: derive them independently, and prove a guard by making the break it guards against.
 - **Per kind of task:**
   - Engine and matching: a scenario or property test that pins the behavior.
