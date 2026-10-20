@@ -1,0 +1,27 @@
+{
+  "description": "A market order takes what the book has and cancels the rest; on an empty opposite side it is rejected.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 3}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "sell", "order_type": {"type": "market"}, "qty": 5},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "sell", "order_type": {"type": "market"}, "qty": 5},
+        {"type": "trade", "maker_order_id": 1, "taker_order_id": 2, "aggressor_side": "sell", "price": 100, "qty": 3},
+        {"type": "canceled", "order_id": 2, "leaves_qty": 2},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 0}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 3, "side": "sell", "order_type": {"type": "market"}, "qty": 1},
+      "events": [
+        {"type": "rejected", "order_id": 3, "reason": "no_liquidity"}
+      ]
+    }
+  ]
+}

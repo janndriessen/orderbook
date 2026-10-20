@@ -1,8 +1,8 @@
 //! Matching of incoming orders against the book, and cancels of resting ones.
 
 use protocol::{
-    CancelRejectReason, CancelRequest, Event, OrderId, OrderType, Price, Qty, RejectReason, Side,
-    TimeInForce,
+    CancelRejectReason, CancelRequest, Command, Event, OrderId, OrderType, Price, Qty,
+    RejectReason, Side, TimeInForce,
 };
 
 use crate::{OrderBook, RestingOrder};
@@ -17,6 +17,38 @@ impl Matcher {
     /// A matcher over an empty book.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Runs one command and returns the events it produced.
+    ///
+    /// The engine's input: each command goes to the method of the same name,
+    /// with the same events and the same panics on values the gateway rules
+    /// out.
+    pub fn apply(&mut self, command: Command) -> Vec<Event> {
+        match command {
+            Command::Place {
+                order_id,
+                side,
+                order_type:
+                    OrderType::Limit {
+                        price,
+                        time_in_force,
+                    },
+                qty,
+            } => self.place_limit(order_id, side, price, time_in_force, qty),
+            Command::Place {
+                order_id,
+                side,
+                order_type: OrderType::Market {},
+                qty,
+            } => self.place_market(order_id, side, qty),
+            Command::Cancel { order_id } => self.cancel(order_id),
+            Command::Replace {
+                order_id,
+                price,
+                qty,
+            } => self.replace(order_id, price, qty),
+        }
     }
 
     /// Matches a limit order against the opposite side.

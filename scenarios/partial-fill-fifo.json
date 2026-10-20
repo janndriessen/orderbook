@@ -1,0 +1,28 @@
+{
+  "description": "A buy trades with the oldest sell first and then with the next one, which keeps the rest of its quantity.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 3},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 3},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 3}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 7}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 3, "side": "buy", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 5},
+      "events": [
+        {"type": "accepted", "order_id": 3, "side": "buy", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 5},
+        {"type": "trade", "maker_order_id": 1, "taker_order_id": 3, "aggressor_side": "buy", "price": 101, "qty": 3},
+        {"type": "trade", "maker_order_id": 2, "taker_order_id": 3, "aggressor_side": "buy", "price": 101, "qty": 2},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 2}
+      ]
+    }
+  ]
+}

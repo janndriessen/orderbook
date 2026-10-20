@@ -1,0 +1,42 @@
+{
+  "description": "A replace to a price that trades acts like a new order and takes liquidity; a post-only order is refused instead.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 4}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 99, "time_in_force": "gtc"}, "qty": 6},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 99, "time_in_force": "gtc"}, "qty": 6},
+        {"type": "l2_update", "side": "buy", "price": 99, "qty": 6}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 3, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "post_only"}, "qty": 1},
+      "events": [
+        {"type": "accepted", "order_id": 3, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "post_only"}, "qty": 1},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 1}
+      ]
+    },
+    {
+      "command": {"type": "replace", "order_id": 3, "price": 101, "qty": 1},
+      "events": [
+        {"type": "cancel_rejected", "order_id": 3, "response_to": "replace", "reason": "post_only_would_cross"}
+      ]
+    },
+    {
+      "command": {"type": "replace", "order_id": 2, "price": 101, "qty": 6},
+      "events": [
+        {"type": "replaced", "order_id": 2, "price": 101, "qty": 6},
+        {"type": "trade", "maker_order_id": 1, "taker_order_id": 2, "aggressor_side": "buy", "price": 101, "qty": 4},
+        {"type": "l2_update", "side": "buy", "price": 99, "qty": 0},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 0},
+        {"type": "l2_update", "side": "buy", "price": 101, "qty": 2}
+      ]
+    }
+  ]
+}

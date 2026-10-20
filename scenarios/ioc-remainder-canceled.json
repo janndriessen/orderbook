@@ -1,0 +1,21 @@
+{
+  "description": "An immediate-or-cancel sell trades what it can and cancels the rest instead of resting it.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 3}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "sell", "order_type": {"type": "limit", "price": 100, "time_in_force": "ioc"}, "qty": 5},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "sell", "order_type": {"type": "limit", "price": 100, "time_in_force": "ioc"}, "qty": 5},
+        {"type": "trade", "maker_order_id": 1, "taker_order_id": 2, "aggressor_side": "sell", "price": 100, "qty": 3},
+        {"type": "canceled", "order_id": 2, "leaves_qty": 2},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 0}
+      ]
+    }
+  ]
+}

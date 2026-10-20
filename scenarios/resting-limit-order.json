@@ -1,0 +1,26 @@
+{
+  "description": "A limit order that does not trade rests; a second order at the same price joins the level behind it.",
+  "steps": [
+    {
+      "command": {"type": "place", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 5},
+      "events": [
+        {"type": "accepted", "order_id": 1, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 5},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 5}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+      "events": [
+        {"type": "accepted", "order_id": 2, "side": "buy", "order_type": {"type": "limit", "price": 100, "time_in_force": "gtc"}, "qty": 3},
+        {"type": "l2_update", "side": "buy", "price": 100, "qty": 8}
+      ]
+    },
+    {
+      "command": {"type": "place", "order_id": 3, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+      "events": [
+        {"type": "accepted", "order_id": 3, "side": "sell", "order_type": {"type": "limit", "price": 101, "time_in_force": "gtc"}, "qty": 4},
+        {"type": "l2_update", "side": "sell", "price": 101, "qty": 4}
+      ]
+    }
+  ]
+}
