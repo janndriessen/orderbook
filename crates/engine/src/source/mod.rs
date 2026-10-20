@@ -1,7 +1,8 @@
-//! Stand-in for the matching engine: a random walk on its own OS thread.
+//! Random-walk order flow driving the real matcher on its own OS thread.
 //!
-//! Like the real engine it runs outside Tokio, owns all of its state and
-//! talks to the rest of the service only through a bounded queue.
+//! The walk produces commands, the matcher turns them into events, and the
+//! thread runs outside Tokio, owns all of its state and talks to the rest of
+//! the service only through a bounded queue.
 
 mod book;
 mod walk;
@@ -11,6 +12,8 @@ use std::thread::{self, JoinHandle};
 use protocol::{Envelope, Event, Ts};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
+
+use crate::matcher::SequencedMatcher;
 
 pub use walk::RandomWalk;
 
@@ -24,17 +27,19 @@ pub const QUEUE_CAPACITY: usize = 4096;
 
 /// Starts the source thread.
 ///
-/// The thread paces itself to the walk's venue clock and stops when the
-/// receiving end of the queue is dropped.
+/// The thread runs the walk's commands through the matcher and paces itself
+/// to the walk's venue clock. It stops when the receiving end of the queue is
+/// dropped.
 pub fn spawn(
     mut walk: RandomWalk,
     queue: mpsc::Sender<Envelope<Event>>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().name("source".into()).spawn(move || {
         info!("source started");
+        let mut matcher = SequencedMatcher::new();
         'run: loop {
             let step = walk.step();
-            for envelope in step.events {
+            for envelope in matcher.apply(step.ts, step.command) {
                 // A full queue blocks here: backpressure, never a dropped event.
                 if queue.blocking_send(envelope).is_err() {
                     break 'run;

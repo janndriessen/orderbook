@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use protocol::{Envelope, Event, OrderId, OrderType, Price, Qty, Seq, Side, TimeInForce, Ts};
+use protocol::{Command, OrderId, OrderType, Price, Qty, Side, TimeInForce, Ts};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -26,28 +26,31 @@ const SWEEP_ODDS: u32 = 16;
 /// Venue-time gap between two steps, in microseconds.
 const STEP_GAP_US: std::ops::RangeInclusive<Ts> = 20_000..=100_000;
 
-/// Events of one step and the venue time that passes before the next one.
+/// The command of one step, its venue time and the pause before the next one.
 #[derive(Debug)]
 pub struct Step {
-    /// Events in emission order, sequenced and timestamped.
-    pub events: Vec<Envelope<Event>>,
+    /// The request to send to the matcher.
+    pub command: Command,
+    /// Venue time of the command.
+    pub ts: Ts,
     /// How long a real-time consumer waits before asking for the next step.
     pub wait: Duration,
 }
 
-/// A reproducible stream of engine events: limit orders placed around
-/// the touch, some canceled or replaced, and occasional takers.
+/// A reproducible stream of order flow: limit orders placed around the
+/// touch, some canceled or replaced, and occasional takers.
 ///
-/// The same seed and start time always produce the same events. The stream
-/// keeps the invariants a real engine would: best bid below best ask, no
-/// empty resting order, every `L2Update` equal to the level's true total and
-/// trades only at the maker's price.
+/// The same seed and start time always produce the same commands. The walk
+/// mirrors the resting orders it has created in its own book, because it needs
+/// their ids and prices to pick valid targets. Every command is one the
+/// matcher accepts: new orders never cross the book except takers, which are
+/// immediate-or-cancel and never exceed the touch, and cancels and replaces
+/// name resting orders.
 #[derive(Debug)]
 pub struct RandomWalk {
     rng: ChaCha8Rng,
     book: RestingBook,
     next_order_id: OrderId,
-    next_seq: Seq,
     /// Side of the latest taker; the next one tends to repeat it.
     last_taker: Side,
     clock: Ts,
@@ -60,32 +63,31 @@ impl RandomWalk {
             rng: ChaCha8Rng::seed_from_u64(seed),
             book: RestingBook::default(),
             next_order_id: 1,
-            next_seq: 1,
             last_taker: Side::Buy,
             clock: start_ts,
         }
     }
 
-    /// Advances the venue clock and produces the events of one action.
+    /// Advances the venue clock and produces the command of one action.
     pub fn step(&mut self) -> Step {
         let gap = self.rng.random_range(STEP_GAP_US);
         self.clock += gap;
 
-        let mut out = Vec::new();
-        if self.book.order_count(Side::Buy) < MIN_ORDERS_PER_SIDE {
-            self.place(Side::Buy, &mut out);
+        let command = if self.book.order_count(Side::Buy) < MIN_ORDERS_PER_SIDE {
+            self.place(Side::Buy)
         } else if self.book.order_count(Side::Sell) < MIN_ORDERS_PER_SIDE {
-            self.place(Side::Sell, &mut out);
+            self.place(Side::Sell)
         } else {
-            self.random_action(&mut out);
-        }
+            self.random_action()
+        };
         Step {
-            events: out,
+            command,
+            ts: self.clock,
             wait: Duration::from_micros(gap),
         }
     }
 
-    fn random_action(&mut self, out: &mut Vec<Envelope<Event>>) {
+    fn random_action(&mut self) -> Command {
         let side = self.random_side();
         let place_below = if self.book.len() > TARGET_ORDERS {
             35
@@ -94,11 +96,11 @@ impl RandomWalk {
         };
         let roll = self.rng.random_range(0..100);
         if roll < place_below {
-            self.place(side, out);
+            self.place(side)
         } else if roll < 80 {
-            self.cancel(out);
+            self.cancel()
         } else if roll < 94 {
-            self.replace(out);
+            self.replace()
         } else {
             // Takers run in streaks, which lets the price trend for a while
             // before it turns instead of jittering around one level.
@@ -108,7 +110,7 @@ impl RandomWalk {
                 self.last_taker
             };
             self.last_taker = side;
-            self.take(side, out);
+            self.take(side)
         }
     }
 
@@ -131,20 +133,6 @@ impl RandomWalk {
         self.rng.random_range(tier)
     }
 
-    fn emit(&mut self, out: &mut Vec<Envelope<Event>>, body: Event) {
-        out.push(Envelope {
-            seq: self.next_seq,
-            ts: self.clock,
-            body,
-        });
-        self.next_seq += 1;
-    }
-
-    fn emit_level(&mut self, out: &mut Vec<Envelope<Event>>, side: Side, price: Price) {
-        let qty = self.book.total(side, price);
-        self.emit(out, Event::L2Update { side, price, qty });
-    }
-
     /// Clamps a price so that an order on `side` would not cross the book.
     fn passive(&self, side: Side, price: Price) -> Price {
         match side {
@@ -164,7 +152,7 @@ impl RandomWalk {
     /// the other side's best price, so the book opens about a tick wide. Most orders land a little away from the touch so
     /// the inside is not replaced constantly; the occasional improvement
     /// closes a spread that takers have opened.
-    fn place(&mut self, side: Side, out: &mut Vec<Envelope<Event>>) {
+    fn place(&mut self, side: Side) -> Command {
         let reference = (self.book.best(side))
             .or_else(|| self.book.best(side.opposite()))
             .unwrap_or(START_PRICE);
@@ -183,19 +171,15 @@ impl RandomWalk {
         self.next_order_id += 1;
 
         self.book.insert(order_id, Order { side, price, qty });
-        self.emit(
-            out,
-            Event::Accepted {
-                order_id,
-                side,
-                order_type: OrderType::Limit {
-                    price,
-                    time_in_force: TimeInForce::Gtc,
-                },
-                qty,
+        Command::Place {
+            order_id,
+            side,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Gtc,
             },
-        );
-        self.emit_level(out, side, price);
+            qty,
+        }
     }
 
     fn random_order(&mut self) -> Option<(OrderId, Order)> {
@@ -206,48 +190,36 @@ impl RandomWalk {
 
     /// Cancels a random order, unless that would thin its side below the
     /// minimum depth; then it adds liquidity instead.
-    fn cancel(&mut self, out: &mut Vec<Envelope<Event>>) {
+    fn cancel(&mut self) -> Command {
         let Some((id, order)) = self.random_order() else {
-            return;
+            let side = self.random_side();
+            return self.place(side);
         };
         if self.book.order_count(order.side) <= MIN_ORDERS_PER_SIDE {
-            return self.place(order.side, out);
+            return self.place(order.side);
         }
         self.book.remove(id);
-        self.emit(
-            out,
-            Event::Canceled {
-                order_id: id,
-                leaves_qty: order.qty,
-            },
-        );
-        self.emit_level(out, order.side, order.price);
+        Command::Cancel { order_id: id }
     }
 
     /// Gives a random order a new quantity and possibly a new price.
-    fn replace(&mut self, out: &mut Vec<Envelope<Event>>) {
+    fn replace(&mut self) -> Command {
         let Some((id, order)) = self.random_order() else {
-            return;
+            let side = self.random_side();
+            return self.place(side);
         };
         let shift = self
             .rng
             .random_range(-MAX_REPLACE_SHIFT..=MAX_REPLACE_SHIFT);
         let price = self.passive(order.side, order.price + shift);
         let qty = self.random_qty();
-        self.apply_replace(id, order, price, qty, out);
+        self.apply_replace(id, order, price, qty)
     }
 
     /// Applies a replace. A new price or a larger quantity sends the order to
     /// the back of its level's queue; a smaller quantity keeps its place, as
     /// at production venues.
-    fn apply_replace(
-        &mut self,
-        id: OrderId,
-        order: Order,
-        price: Price,
-        qty: Qty,
-        out: &mut Vec<Envelope<Event>>,
-    ) {
+    fn apply_replace(&mut self, id: OrderId, order: Order, price: Price, qty: Qty) -> Command {
         if price == order.price && qty <= order.qty {
             self.book.resize(id, qty);
         } else {
@@ -261,30 +233,23 @@ impl RandomWalk {
                 },
             );
         }
-        self.emit(
-            out,
-            Event::Replaced {
-                order_id: id,
-                price,
-                qty,
-            },
-        );
-        if price != order.price {
-            self.emit_level(out, order.side, order.price);
+        Command::Replace {
+            order_id: id,
+            price,
+            qty,
         }
-        self.emit_level(out, order.side, price);
     }
 
     /// A taker of `side` buys or sells part or all of the opposite touch
     /// level, oldest maker first. Without a second level behind it the touch
     /// is left alone and liquidity is added instead.
-    fn take(&mut self, side: Side, out: &mut Vec<Envelope<Event>>) {
+    fn take(&mut self, side: Side) -> Command {
         let maker_side = side.opposite();
         let Some(price) = self.book.best(maker_side) else {
-            return self.place(side, out);
+            return self.place(side);
         };
         if self.book.level_count(maker_side) < 2 {
-            return self.place(side, out);
+            return self.place(side);
         }
         // The taker is a marketable limit order priced at the touch:
         // immediate-or-cancel, as a taker is. Its quantity never exceeds the
@@ -297,19 +262,6 @@ impl RandomWalk {
         };
         let taker_id = self.next_order_id;
         self.next_order_id += 1;
-        self.emit(
-            out,
-            Event::Accepted {
-                order_id: taker_id,
-                side,
-                order_type: OrderType::Limit {
-                    price,
-                    time_in_force: TimeInForce::Ioc,
-                },
-                qty: taker_qty,
-            },
-        );
-
         let mut remaining = taker_qty;
         for maker_id in self.book.queue(maker_side, price) {
             let Some(maker) = self.book.get(maker_id) else {
@@ -321,22 +273,20 @@ impl RandomWalk {
             } else {
                 self.book.resize(maker_id, maker.qty - qty);
             }
-            self.emit(
-                out,
-                Event::Trade {
-                    maker_order_id: maker_id,
-                    taker_order_id: taker_id,
-                    aggressor_side: side,
-                    price,
-                    qty,
-                },
-            );
             remaining -= qty;
             if remaining == 0 {
                 break;
             }
         }
-        self.emit_level(out, maker_side, price);
+        Command::Place {
+            order_id: taker_id,
+            side,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Ioc,
+            },
+            qty: taker_qty,
+        }
     }
 }
 
@@ -344,7 +294,10 @@ impl RandomWalk {
 mod tests {
     use std::collections::BTreeMap;
 
+    use protocol::{Envelope, Event, Seq};
+
     use super::*;
+    use crate::matcher::SequencedMatcher;
 
     /// Rebuilds the book from events alone and checks every invariant on the way.
     #[derive(Default)]
@@ -439,6 +392,11 @@ mod tests {
                     leaves_qty,
                 } => {
                     let order = self.orders.remove(&order_id).expect("canceled order rests");
+                    assert_eq!(
+                        self.time_in_force[&order_id],
+                        TimeInForce::Gtc,
+                        "takers never leave a canceled remainder"
+                    );
                     assert_eq!(order.qty, leaves_qty);
                 }
                 Event::L2Update { side, price, qty } => {
@@ -472,19 +430,26 @@ mod tests {
         }
     }
 
+    /// One walk step run through the matcher: the events it produces.
+    fn next_events(walk: &mut RandomWalk, matcher: &mut SequencedMatcher) -> Vec<Envelope<Event>> {
+        let step = walk.step();
+        matcher.apply(step.ts, step.command)
+    }
+
     fn run(seed: u64, steps: usize) -> Vec<Envelope<Event>> {
         let mut walk = RandomWalk::new(seed, 1_700_000_000_000_000);
+        let mut matcher = SequencedMatcher::new();
         let mut shadow = Shadow::default();
         let mut all = Vec::new();
         for _ in 0..steps {
-            let step = walk.step();
-            for env in &step.events {
+            let events = next_events(&mut walk, &mut matcher);
+            for env in &events {
                 shadow.apply(env);
             }
             if shadow.orders.len() >= 2 * MIN_ORDERS_PER_SIDE {
                 shadow.assert_uncrossed();
             }
-            all.extend(step.events);
+            all.extend(events);
         }
         shadow.assert_uncrossed();
         all
@@ -516,6 +481,7 @@ mod tests {
     #[test]
     fn takers_fill_oldest_maker_first() {
         let mut walk = RandomWalk::new(5, 0);
+        let mut matcher = SequencedMatcher::new();
         let mut checked = 0;
         for _ in 0..5_000 {
             let bids = walk
@@ -526,9 +492,7 @@ mod tests {
                 .book
                 .best(Side::Sell)
                 .map(|p| walk.book.queue(Side::Sell, p));
-            let filled: Vec<(Side, OrderId)> = walk
-                .step()
-                .events
+            let filled: Vec<(Side, OrderId)> = next_events(&mut walk, &mut matcher)
                 .iter()
                 .filter_map(|e| match e.body {
                     Event::Trade {
@@ -562,12 +526,23 @@ mod tests {
     #[test]
     fn long_run_stays_bounded_with_a_tight_spread() {
         // The thresholds are empirical regression bounds with headroom over
-        // what these seeds produce, not limits derived from the model.
+        // what these seeds produce, not limits derived from the model. They
+        // are measured on the walk's own book, which is checked against every
+        // level total the matcher publishes, so they hold for what clients see.
         for seed in 1..=4 {
             let mut walk = RandomWalk::new(seed, 0);
+            let mut matcher = SequencedMatcher::new();
             let (mut steps, mut one_tick, mut widest, mut largest) = (0, 0, 0, 0);
             for _ in 0..50_000 {
-                walk.step();
+                for env in next_events(&mut walk, &mut matcher) {
+                    if let Event::L2Update { side, price, qty } = env.body {
+                        assert_eq!(
+                            walk.book.total(side, price),
+                            qty,
+                            "seed {seed}: the walk's book differs from the matcher's"
+                        );
+                    }
+                }
                 let (Some(bid), Some(ask)) =
                     (walk.book.best(Side::Buy), walk.book.best(Side::Sell))
                 else {
@@ -601,9 +576,8 @@ mod tests {
         for id in [1, 2, 3] {
             walk.book.insert(id, order);
         }
-        let mut out = Vec::new();
 
-        walk.apply_replace(1, order, 100, 4, &mut out);
+        walk.apply_replace(1, order, 100, 4);
         assert_eq!(
             walk.book.queue(Side::Buy, 100),
             vec![1, 2, 3],
@@ -611,14 +585,14 @@ mod tests {
         );
 
         let shrunk = walk.book.get(1).expect("order rests");
-        walk.apply_replace(1, shrunk, 100, 12, &mut out);
+        walk.apply_replace(1, shrunk, 100, 12);
         assert_eq!(
             walk.book.queue(Side::Buy, 100),
             vec![2, 3, 1],
             "larger goes to the back"
         );
 
-        walk.apply_replace(2, order, 101, 10, &mut out);
+        walk.apply_replace(2, order, 101, 10);
         assert_eq!(walk.book.queue(Side::Buy, 101), vec![2]);
         assert_eq!(walk.book.total(Side::Buy, 100), 22);
     }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Order book service: event source, publisher and WebSocket market-data feed."
+description = "Order book service: order flow, matcher, publisher and WebSocket market-data feed."
 
 [[bin]]
 name = "orderbook"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+matching.workspace = true
 protocol.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

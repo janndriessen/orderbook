@@ -180,6 +180,7 @@ mod tests {
 
     use super::*;
     use crate::app::market;
+    use crate::matcher::SequencedMatcher;
     use crate::source::RandomWalk;
 
     fn env(seq: Seq, body: Event) -> Envelope<Event> {
@@ -462,13 +463,15 @@ mod tests {
     #[test]
     fn clients_joining_at_any_point_stay_consistent() {
         let mut walk = RandomWalk::new(11, 0);
+        let mut matcher = SequencedMatcher::new();
         let mut publisher = Publisher::new(market());
         let mut flow_seqs = Vec::new();
         let mut clients: Vec<(Client, broadcast::Receiver<Frame>)> = Vec::new();
         let mut in_last_spell = 0;
 
         for i in 0..600 {
-            for envelope in walk.step().events {
+            let step = walk.step();
+            for envelope in matcher.apply(step.ts, step.command) {
                 if !matches!(envelope.body, Event::L2Update { .. }) {
                     flow_seqs.push(envelope.seq);
                 }

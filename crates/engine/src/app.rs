@@ -22,9 +22,9 @@ pub fn market() -> MarketInfo {
 
 /// Runs the service on `listener` until `shutdown` fires or a component dies.
 ///
-/// Starts the random-walk source on its own thread, the publisher task and
-/// the WebSocket server, and waits for all of them to stop. Without a `seed`
-/// one is derived from the clock.
+/// Starts the source thread (random-walk order flow driving the matcher), the
+/// publisher task and the WebSocket server, and waits for all of them to stop.
+/// Without a `seed` one is derived from the clock.
 ///
 /// Returns an error if the server failed or if the publisher or the source
 /// panicked, so a supervisor can restart the process.
@@ -41,7 +41,7 @@ pub async fn run(
     let source = source::spawn(RandomWalk::new(seed, start_ts), queue)?;
     let (handle, publisher) = publisher::spawn(market(), events, shutdown.clone());
 
-    // The same seed gives the same event stream; timestamps start at launch time.
+    // The same seed gives the same command stream; timestamps start at launch time.
     info!(%addr, seed, "serving feed at /ws");
     let served = axum::serve(listener, ws::router(handle, shutdown.clone()))
         .with_graceful_shutdown(shutdown.clone().cancelled_owned())

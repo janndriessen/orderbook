@@ -1,10 +1,13 @@
-//! Order book service: event source, publisher and WebSocket market-data feed.
+//! Order book service: order flow, matcher, publisher and WebSocket market-data
+//! feed.
 //!
-//! Events flow from the source (a stand-in for the matching engine, on its own
-//! thread) through a bounded queue to the publisher, which aggregates them
-//! into sequenced feed messages and broadcasts them to WebSocket clients.
+//! Commands flow from the source (a seeded random walk of order flow, on its
+//! own thread) into the matcher, whose events pass through a bounded queue to
+//! the publisher, which aggregates them into sequenced feed messages and
+//! broadcasts them to WebSocket clients.
 
 mod app;
+mod matcher;
 mod publisher;
 mod source;
 mod ws;
