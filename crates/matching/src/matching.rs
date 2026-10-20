@@ -88,6 +88,7 @@ impl Matcher {
                 side,
                 price,
                 qty: remaining,
+                time_in_force,
             };
             self.book
                 .add(resting)
@@ -161,6 +162,74 @@ impl Matcher {
                 reason: CancelRejectReason::UnknownOrder,
             }],
         }
+    }
+
+    /// Changes a resting order to price `price` and open quantity `qty`.
+    ///
+    /// An order whose price is unchanged and whose quantity does not grow
+    /// keeps its place in the queue. Any other change behaves like a cancel
+    /// followed by a new arrival with the same side and time in force: the
+    /// order first trades against the opposite side if the new price crosses,
+    /// and rests any remainder at the back of the queue at the new price. A
+    /// replace that changes nothing still counts as the first kind: it is
+    /// reported and the order keeps its priority.
+    ///
+    /// The events are `Replaced`, one `Trade` per fill (this order is the
+    /// taker), then one `L2Update` per touched level carrying its final
+    /// total: the order's old level, the consumed opposite levels in
+    /// consumption order, and the new level if a remainder rests there.
+    ///
+    /// Two requests are refused with a lone `CancelRejected` that leaves the
+    /// book unchanged: an id that is not resting (`UnknownOrder`), and a
+    /// post-only order whose new price would trade (`PostOnlyWouldCross`).
+    ///
+    /// # Panics
+    ///
+    /// If `qty` is zero; the gateway's stateless checks rule that out.
+    pub fn replace(&mut self, order_id: OrderId, price: Price, qty: Qty) -> Vec<Event> {
+        assert!(qty > 0, "orders have a positive quantity");
+        let refuse = |reason| {
+            vec![Event::CancelRejected {
+                order_id,
+                response_to: CancelRequest::Replace,
+                reason,
+            }]
+        };
+        let Some(old) = self.book.order(order_id) else {
+            return refuse(CancelRejectReason::UnknownOrder);
+        };
+        if old.time_in_force == TimeInForce::PostOnly && self.crosses(old.side, Some(price)) {
+            return refuse(CancelRejectReason::PostOnlyWouldCross);
+        }
+        let mut events = vec![Event::Replaced {
+            order_id,
+            price,
+            qty,
+        }];
+        if price == old.price && qty <= old.qty {
+            self.book.reduce(order_id, qty);
+            events.push(self.level_update(old.side, old.price));
+            return events;
+        }
+        self.book.cancel(order_id);
+        let (remaining, touched) = self.take(order_id, old.side, Some(price), qty, &mut events);
+        if remaining > 0 {
+            self.book
+                .add(RestingOrder {
+                    price,
+                    qty: remaining,
+                    ..old
+                })
+                .expect("the id was just removed from the book");
+        }
+        events.push(self.level_update(old.side, old.price));
+        for level_price in touched {
+            events.push(self.level_update(old.side.opposite(), level_price));
+        }
+        if remaining > 0 && price != old.price {
+            events.push(self.level_update(old.side, price));
+        }
+        events
     }
 
     /// Fills up to `qty` against the opposite side while its best price
@@ -754,6 +823,258 @@ mod tests {
         assert_eq!(
             m.place_limit(1, Side::Buy, 99, Gtc, 2),
             [accepted(1, Side::Buy, 99, 2), l2(Side::Buy, 99, 2)]
+        );
+    }
+
+    fn replaced(order_id: OrderId, price: Price, qty: Qty) -> Event {
+        Event::Replaced {
+            order_id,
+            price,
+            qty,
+        }
+    }
+
+    fn unknown_replace(order_id: OrderId) -> Event {
+        Event::CancelRejected {
+            order_id,
+            response_to: CancelRequest::Replace,
+            reason: CancelRejectReason::UnknownOrder,
+        }
+    }
+
+    #[test]
+    fn reducing_keeps_priority_so_a_later_taker_fills_it_first() {
+        for (side, taker_side) in [(Side::Buy, Side::Sell), (Side::Sell, Side::Buy)] {
+            let mut m = matcher_with_queue(side);
+            assert_eq!(
+                m.replace(1, 100, 4),
+                [replaced(1, 100, 4), l2(side, 100, 54)]
+            );
+            assert_eq!(queue(&m, side, 100), [1, 2, 3]);
+            assert_eq!(
+                m.place_limit(9, taker_side, 100, Ioc, 4),
+                [
+                    accepted_as(9, taker_side, 100, Ioc, 4),
+                    trade(1, 9, taker_side, 100, 4),
+                    l2(side, 100, 50),
+                ]
+            );
+            assert_eq!(queue(&m, side, 100), [2, 3]);
+        }
+    }
+
+    #[test]
+    fn replace_without_changes_is_reported_and_keeps_priority() {
+        let mut m = matcher_with_queue(Side::Buy);
+        assert_eq!(
+            m.replace(1, 100, 10),
+            [replaced(1, 100, 10), l2(Side::Buy, 100, 60)]
+        );
+        assert_eq!(queue(&m, Side::Buy, 100), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_price_change_moves_the_order_behind_those_at_the_new_price() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut m = matcher_with_queue(side);
+            m.place_limit(4, side, 99, Gtc, 7);
+            assert_eq!(
+                m.replace(4, 100, 7),
+                [replaced(4, 100, 7), l2(side, 99, 0), l2(side, 100, 67)]
+            );
+            assert_eq!(queue(&m, side, 100), [1, 2, 3, 4]);
+            assert!(m.book.level(side, 99).is_none());
+        }
+    }
+
+    #[test]
+    fn a_price_change_with_a_smaller_quantity_still_loses_priority() {
+        let mut m = matcher_with_queue(Side::Sell);
+        m.place_limit(4, Side::Sell, 101, Gtc, 8);
+        assert_eq!(
+            m.replace(1, 101, 3),
+            [
+                replaced(1, 101, 3),
+                l2(Side::Sell, 100, 50),
+                l2(Side::Sell, 101, 11)
+            ]
+        );
+        assert_eq!(queue(&m, Side::Sell, 101), [4, 1]);
+        assert_eq!(queue(&m, Side::Sell, 100), [2, 3]);
+    }
+
+    #[test]
+    fn a_quantity_increase_moves_the_order_to_the_back_of_its_level() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut m = matcher_with_queue(side);
+            assert_eq!(
+                m.replace(1, 100, 15),
+                [replaced(1, 100, 15), l2(side, 100, 65)]
+            );
+            assert_eq!(queue(&m, side, 100), [2, 3, 1]);
+        }
+    }
+
+    #[test]
+    fn a_requeued_order_fills_after_the_others() {
+        let mut m = matcher_with_queue(Side::Sell);
+        m.replace(1, 100, 11);
+        assert_eq!(
+            m.place_limit(9, Side::Buy, 100, Ioc, 25),
+            [
+                accepted_as(9, Side::Buy, 100, Ioc, 25),
+                trade(2, 9, Side::Buy, 100, 20),
+                trade(3, 9, Side::Buy, 100, 5),
+                l2(Side::Sell, 100, 36),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_an_unknown_id_is_rejected_and_leaves_the_book_alone() {
+        let mut m = matcher_with_queue(Side::Buy);
+        assert_eq!(m.replace(99, 101, 5), [unknown_replace(99)]);
+        assert_eq!(queue(&m, Side::Buy, 100), [1, 2, 3]);
+        m.cancel(1);
+        assert_eq!(m.replace(1, 100, 5), [unknown_replace(1)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive quantity")]
+    fn replace_with_zero_quantity_panics() {
+        matcher_with_queue(Side::Buy).replace(1, 100, 0);
+    }
+
+    fn refused_post_only_replace(order_id: OrderId) -> Event {
+        Event::CancelRejected {
+            order_id,
+            response_to: CancelRequest::Replace,
+            reason: CancelRejectReason::PostOnlyWouldCross,
+        }
+    }
+
+    #[test]
+    fn a_crossing_post_only_replace_is_refused_and_changes_nothing() {
+        // The order rests at 100; the opposite best is 105 for a bid, 95 for an ask.
+        // The targets are an equal and a better (more aggressive) price.
+        for (side, taker_side, best, better) in [
+            (Side::Buy, Side::Sell, 105, 106),
+            (Side::Sell, Side::Buy, 95, 94),
+        ] {
+            for target in [best, better] {
+                let mut m = Matcher::new();
+                m.place_limit(1, side, 100, Gtc, 4);
+                m.place_limit(2, side, 100, PostOnly, 6);
+                m.place_limit(3, taker_side, best, Gtc, 9);
+                assert_eq!(m.replace(2, target, 3), [refused_post_only_replace(2)]);
+                assert_eq!(queue(&m, side, 100), [1, 2]);
+                assert_eq!(m.book.order(2).map(|o| (o.price, o.qty)), Some((100, 6)));
+                assert_eq!(queue(&m, taker_side, best), [3]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_post_only_replace_that_does_not_cross_is_an_ordinary_replace() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 105, Gtc, 9);
+        m.place_limit(2, Side::Buy, 100, PostOnly, 6);
+        assert_eq!(
+            m.replace(2, 104, 6),
+            [
+                replaced(2, 104, 6),
+                l2(Side::Buy, 100, 0),
+                l2(Side::Buy, 104, 6)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gtc_replace_that_fully_fills_rests_nothing() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 101, Gtc, 5);
+        m.place_limit(2, Side::Buy, 99, Gtc, 5);
+        assert_eq!(
+            m.replace(2, 102, 5),
+            [
+                replaced(2, 102, 5),
+                trade(1, 2, Side::Buy, 101, 5),
+                l2(Side::Buy, 99, 0),
+                l2(Side::Sell, 101, 0),
+            ]
+        );
+        assert!(!m.book.contains(2));
+    }
+
+    #[test]
+    fn a_partly_filled_replace_rests_the_remainder_behind_existing_orders() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 100, Gtc, 4);
+        m.place_limit(2, Side::Buy, 98, Gtc, 6);
+        m.place_limit(3, Side::Sell, 101, Gtc, 2);
+        assert_eq!(
+            m.replace(2, 101, 6),
+            [
+                replaced(2, 101, 6),
+                trade(3, 2, Side::Buy, 101, 2),
+                l2(Side::Buy, 98, 0),
+                l2(Side::Sell, 101, 0),
+                l2(Side::Buy, 101, 4),
+            ]
+        );
+        m.place_limit(4, Side::Buy, 101, Gtc, 1);
+        assert_eq!(queue(&m, Side::Buy, 101), [2, 4]);
+    }
+
+    #[test]
+    fn a_marketable_replace_sweeps_levels_at_the_makers_prices() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Buy, 100, Gtc, 10);
+        m.place_limit(2, Side::Sell, 101, Gtc, 3);
+        m.place_limit(3, Side::Sell, 101, Gtc, 2);
+        m.place_limit(4, Side::Sell, 102, Gtc, 4);
+        m.place_limit(5, Side::Sell, 103, Gtc, 9);
+        assert_eq!(
+            m.replace(1, 102, 12),
+            [
+                replaced(1, 102, 12),
+                trade(2, 1, Side::Buy, 101, 3),
+                trade(3, 1, Side::Buy, 101, 2),
+                trade(4, 1, Side::Buy, 102, 4),
+                l2(Side::Buy, 100, 0),
+                l2(Side::Sell, 101, 0),
+                l2(Side::Sell, 102, 0),
+                l2(Side::Buy, 102, 3),
+            ]
+        );
+        assert_eq!(m.book.best_ask(), Some(103));
+    }
+
+    #[test]
+    fn a_marketable_sell_replace_trades_against_bids() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 105, Gtc, 4);
+        m.place_limit(2, Side::Buy, 100, Gtc, 3);
+        assert_eq!(
+            m.replace(1, 99, 4),
+            [
+                replaced(1, 99, 4),
+                trade(2, 1, Side::Sell, 100, 3),
+                l2(Side::Sell, 105, 0),
+                l2(Side::Buy, 100, 0),
+                l2(Side::Sell, 99, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quantity_increase_that_stays_passive_is_unaffected_by_the_opposite_side() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 105, Gtc, 1);
+        m.place_limit(2, Side::Buy, 100, PostOnly, 2);
+        assert_eq!(
+            m.replace(2, 100, 5),
+            [replaced(2, 100, 5), l2(Side::Buy, 100, 5)]
         );
     }
 }

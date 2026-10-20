@@ -35,7 +35,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `CancelRejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher, random-walk event source, WebSocket feed (`orderbook` binary)
 - [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
-- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel of resting orders; replace is not there yet
+- [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [ ] Matching engine and hand-written scenarios
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
@@ -70,7 +70,7 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 
 ```
 crates/protocol/   shared message format; source of the TypeScript types
-crates/matching/   order book, limit- and market-order matching and cancel: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
+crates/matching/   order book, limit- and market-order matching, cancel and replace: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
 crates/engine/     order book service: random-walk event source, publisher, WebSocket feed
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 docs/              diagrams
@@ -88,7 +88,7 @@ Planned, not yet present: the gateway in `crates/engine`, `crates/adapters`, `cr
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
 - **Price protection:** market orders have no protection, so on a thin book one can sweep far through the levels. Production venues add price bands or protection limits.
-- **Order types:** market orders trade immediately at any price, cancel any remainder and are rejected on an empty opposite side. Limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced). There is no fill-or-kill, stop or iceberg.
+- **Order types:** market orders trade immediately at any price, cancel any remainder and are rejected on an empty opposite side. Limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced). A replace that changes the price or grows the quantity is a cancel followed by a new arrival: it loses time priority, and if the new price crosses it trades, except that a post-only order is refused instead. There is no fill-or-kill, stop or iceberg.
 - **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids.
 - **Event source:** a seeded random walk stands in for the matching engine and emits the same events the engine will: it places, cancels, replaces and takes orders around the touch, with price-time priority. Its takers are labeled IOC and always fill in full, so it never emits `Canceled` for an IOC remainder.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.

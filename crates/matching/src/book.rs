@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use protocol::{OrderId, Price, Qty, Side};
+use protocol::{OrderId, Price, Qty, Side, TimeInForce};
 
 /// An order resting in the book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +15,9 @@ pub struct RestingOrder {
     pub price: Price,
     /// Remaining quantity in lots.
     pub qty: Qty,
+    /// How the order was placed. A resting order is good-till-cancel or
+    /// post-only; a replace needs to know which.
+    pub time_in_force: TimeInForce,
 }
 
 /// All resting orders at one price: a FIFO queue and its total quantity.
@@ -250,6 +253,7 @@ mod tests {
             side,
             price,
             qty,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
