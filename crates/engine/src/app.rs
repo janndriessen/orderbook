@@ -1,6 +1,7 @@
 //! Wires the source, the engine, the publisher and the WebSocket server together.
 
 use std::io;
+use std::thread::JoinHandle;
 
 use protocol::MarketInfo;
 use tokio::net::TcpListener;
@@ -60,23 +61,37 @@ pub async fn run(
     }
     // The publisher dropped the event receiver, so the engine thread exits on
     // its next send, which drops the command receiver and stops the source in
-    // turn. Joining blocks briefly, so keep it off the runtime.
-    for (name, thread) in [("engine", engine), ("source", source)] {
-        match tokio::task::spawn_blocking(move || thread.join()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                error!(thread = name, "thread panicked");
-                failed = true;
-            }
-            Err(err) => {
-                error!(%err, thread = name, "could not join thread");
-                failed = true;
-            }
-        }
+    // turn.
+    if !join_threads(vec![("engine", engine), ("source", source)]).await {
+        failed = true;
     }
     served?;
     if failed {
         return Err(io::Error::other("a service component failed"));
     }
     Ok(())
+}
+
+/// Waits for each named thread to end, in order, and logs any that panicked
+/// or could not be joined.
+///
+/// Returns whether every thread ended normally. A failure does not stop the
+/// joining, so every thread is waited for. Joining blocks, so it runs off the
+/// runtime.
+async fn join_threads(threads: Vec<(&'static str, JoinHandle<()>)>) -> bool {
+    let mut clean = true;
+    for (name, thread) in threads {
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                error!(thread = name, "thread panicked");
+                clean = false;
+            }
+            Err(err) => {
+                error!(%err, thread = name, "could not join thread");
+                clean = false;
+            }
+        }
+    }
+    clean
 }
