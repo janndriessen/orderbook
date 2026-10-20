@@ -563,6 +563,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.1.0"
+dependencies = [
+ "matching",
+ "protocol",
+ "rand 0.10.3",
+ "rand_chacha 0.10.0",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
