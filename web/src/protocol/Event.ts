@@ -11,7 +11,9 @@ import type { Side } from "./Side";
  * One command can produce several events: an aggressive order produces
  * `Accepted`, one `Trade` per matched maker, `Canceled` if an
  * immediate-or-cancel or market remainder is left, and the resulting
- * `L2Update`s.
+ * `L2Update`s. A replace produces `Replaced`, one `Trade` per matched maker
+ * if the new price crosses, and the resulting `L2Update`s; it is never
+ * `Accepted` again.
  */
 export type Event = {
   "type": "accepted";
@@ -62,7 +64,7 @@ export type Event = {
    */
   maker_order_id: number;
   /**
-   * The incoming order that took liquidity.
+   * The order that took liquidity.
    */
   taker_order_id: number;
   /**
@@ -88,7 +90,9 @@ export type Event = {
    */
   price: number;
   /**
-   * Open quantity after the change.
+   * Quantity requested by the replace. A replace that crosses the book
+   * reports its fills as `Trade`s, so the open quantity can end up
+   * smaller.
    */
   qty: number;
 } | {
