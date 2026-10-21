@@ -55,6 +55,7 @@ The pinned toolchain (Rust 1.99.1, see `rust-toolchain.toml`) is installed autom
 ```bash
 cargo test --workspace                   # also regenerates the TypeScript types in web/src/protocol/
 cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
+cargo run -p harness --release --bin bench   # matcher throughput and cancel cost; release build only, numbers depend on the machine
 ```
 
 The generated TypeScript files are committed; do not edit them by hand.

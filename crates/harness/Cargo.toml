@@ -9,8 +9,6 @@ description = "Invariant checks for the matcher, and a naive reference matcher t
 [dependencies]
 matching.workspace = true
 protocol.workspace = true
-
-[dev-dependencies]
 generator.workspace = true
 
 [lints]
