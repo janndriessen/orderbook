@@ -94,7 +94,7 @@ impl OrderBook {
         level.total = level
             .total
             .checked_add(order.qty)
-            .expect("level totals stay below 2^53, the protocol's quantity bound");
+            .expect("the gateway caps orders at 10^8 lots, so overflowing a u64 total takes about 1.8 × 10^11 resting orders, far more than fit in memory");
         self.orders.insert(order.order_id, order);
         Ok(())
     }
