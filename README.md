@@ -39,14 +39,14 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
 - [x] The `matching` crate runs alone on its own engine thread, driven by random-walk order flow from the source thread through a bounded command queue
 - [x] Gateway that validates and sequences commands in front of the engine thread: checks that need no book state (bounds of order size, price and order id, and order id reuse), then gap-free command sequence numbers
-- [ ] Fuzz generator, invariant checks and benchmarks
+- [x] Fuzz generator, invariant checks and benchmarks
   - [x] `generator` crate: seeded fuzz order flow (all time-in-force values, market orders, cancels and replaces of live, stale and unknown ids) that stays inside the gateway's bounds, checked against the matcher in its tests
   - [x] `harness` crate: structural invariants (book structure, event consistency, the feed's levels matching the book) checked after every command of 50 seeded fuzz runs of 2,000 commands, plus a determinism check. They catch an inconsistent book or feed, not a consistent but wrong one; the reference model below checks the outcomes
   - [x] Reference model: a naive second matcher in the `harness` crate, whose events its fuzz test compares with the real matcher's exactly. It shares no code with the matcher, but it could share a misreading of the docs
   - [x] Benchmark: `cargo run -p harness --release --bin bench` measures throughput and cancel cost (results under the price-levels trade-off)
-  - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
-  - [ ] Bound level totals: decide how a level total above 2^53 is prevented or published (see the trade-offs).
+  - [x] Level totals: left unbounded on purpose, since real BTC flow stays far below 2^53 (see the trade-offs)
 - [ ] Hyperliquid adapter and replayer
+  - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
 
 ## Getting started
@@ -99,7 +99,7 @@ Planned, not yet present: `crates/adapters`, `crates/replayer` and `data/` (reco
 - **Sequence gaps:** a command whose sequence number is not the next one stops the engine with a panic, and the service with it. Production engines request missing input from the sequencer's journal on a gap and drop a repeated number as a duplicate, then carry on.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
-- **Level totals:** nothing bounds a level's total quantity. Above 2^53 lots, which takes about 90 million maximum-size orders at one price, JavaScript clients would read it inexactly; the matcher only stops, with a panic, at the far larger `u64` limit. Production venues cap open orders per account and publish sizes as decimal strings or binary integers.
+- **Level totals:** nothing bounds a level's total quantity, and above 2^53 lots JavaScript clients would read it inexactly. Real BTC flow cannot get there: all bitcoin that will ever exist is 2.1 × 10^12 lots, about 4,000 times below the bound, so only synthetic flow could (about 90 million maximum-size orders at one price). A matcher for markets with tiny lots or huge supplies would need a limit; production venues cap open orders per account and publish sizes as decimal strings or binary integers.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel. Measured on an Apple M3 Max (release build, 2026-10-20): the matcher handles about 8.6 million fuzz commands per second (about 117 ns each); a cancel at the front of a level stays near 35 ns, while one in the middle costs about 250 ns with 1,000 orders at the price, 1.9 µs with 10,000 and 21 µs with 100,000. At the level lengths expected in practice this is the cost of one ordinary command, so the simpler structure stays until replayed data shows longer levels.
 - **Price protection:** market orders have no protection, so on a thin book one can sweep far through the levels. Production venues add price bands or protection limits. Limit prices have no bands either: the gateway only checks that a price is positive and below 2^53, while production venues reject limit prices too far from a reference price, which needs book state.
 - **Order types:** market orders trade immediately at any price, cancel any remainder and are rejected on an empty opposite side. Limit orders support GTC, IOC and post-only (a post-only order that would cross is rejected, never re-priced). A replace that changes the price or grows the quantity is a cancel followed by a new arrival: it loses time priority, and if the new price crosses it trades, except that a post-only order is refused instead. The `qty` of a replace is the new open quantity, not the total order size including fills; production venues differ on this. There is no fill-or-kill, stop or iceberg.
