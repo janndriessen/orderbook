@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Invariant checks that run order flow through the matcher and check the book's structure and the consistency of its events."
+description = "Invariant checks for the matcher, and a naive reference matcher to compare its events with."
 
 [dependencies]
 matching.workspace = true

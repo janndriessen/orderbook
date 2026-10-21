@@ -41,8 +41,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [x] Gateway that validates and sequences commands in front of the engine thread: checks that need no book state (bounds of order size, price and order id, and order id reuse), then gap-free command sequence numbers
 - [ ] Fuzz generator, invariant checks and benchmarks
   - [x] `generator` crate: seeded fuzz order flow (all time-in-force values, market orders, cancels and replaces of live, stale and unknown ids) that stays inside the gateway's bounds, checked against the matcher in its tests
-  - [x] `harness` crate: structural invariants (book structure, event consistency, the feed's levels matching the book) checked after every command of 50 seeded fuzz runs of 2,000 commands, plus a determinism check. They catch an inconsistent book or feed, not a consistent but wrong one
-  - [ ] Reference model: a naive second matcher whose events every fuzz run must match exactly
+  - [x] `harness` crate: structural invariants (book structure, event consistency, the feed's levels matching the book) checked after every command of 50 seeded fuzz runs of 2,000 commands, plus a determinism check. They catch an inconsistent book or feed, not a consistent but wrong one; the reference model below checks the outcomes
+  - [x] Reference model: a naive second matcher in the `harness` crate, whose events its fuzz test compares with the real matcher's exactly. It shares no code with the matcher, but it could share a misreading of the docs
   - [ ] Benchmark cancel cost: price levels use a `VecDeque`, so canceling inside a level is linear in that level's length; switch to an index-based linked list if it matters.
   - [ ] Bound level totals: decide how a level total above 2^53 is prevented or published (see the trade-offs).
 - [ ] Hyperliquid adapter and replayer
@@ -79,7 +79,7 @@ crates/protocol/   shared message format; source of the TypeScript types
 crates/matching/   order book, limit- and market-order matching, cancel and replace: price levels with FIFO queues; no async or network crates, depends only on protocol (plus compile-time thiserror)
 crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
-crates/harness/    invariant checks over the matcher, driven by the fuzz generator in its tests; depends on protocol and matching (plus generator in its tests)
+crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams

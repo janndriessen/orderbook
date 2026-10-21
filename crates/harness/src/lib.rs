@@ -1,14 +1,22 @@
-//! Invariant checks over the matcher: a [`Run`] checks the book's structure
-//! and the consistency of the events after every command. It does not know
-//! the right outcome of a command, so it catches a book or feed that is
+//! Checks over the matcher: a [`Run`] checks the book's structure and the
+//! consistency of the events after every command. It does not know the right
+//! outcome of a command, so on its own it catches a book or feed that is
 //! inconsistent, not one that is consistent but wrong. Failures panic with a
 //! message naming the broken invariant; the calling test adds what is needed
 //! to reproduce it.
+//!
+//! The [`ReferenceMatcher`] supplies an independent outcome to compare with: a
+//! naive second matcher whose events a test compares with the real one's. It
+//! is a second opinion, not an authority; where both share a misreading of
+//! the documented behavior, their agreement shows nothing.
+
+mod reference;
 
 use std::collections::{HashMap, HashSet};
 
 use matching::{Matcher, OrderBook};
 use protocol::{Command, Event, OrderId, OrderType, Price, Qty, Side, TimeInForce};
+pub use reference::ReferenceMatcher;
 
 /// Checks the structure of a book.
 ///
@@ -76,6 +84,11 @@ impl Run {
     /// A run over an empty book.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The book, for reading its levels and resting orders.
+    pub fn book(&self) -> &OrderBook {
+        self.matcher.book()
     }
 
     /// Applies `command`, checks the events and the book, and returns the
