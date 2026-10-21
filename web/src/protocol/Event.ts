@@ -14,6 +14,15 @@ import type { Side } from "./Side";
  * `L2Update`s. A replace produces `Replaced`, one `Trade` per matched maker
  * if the new price crosses, and the resulting `L2Update`s; it is never
  * `Accepted` again.
+ *
+ * The order is fixed. A new order gives `Accepted`, the `Trade`s, `Canceled`
+ * for an unrested remainder, then one `L2Update` per touched level: the
+ * consumed levels in consumption order, then the level it rests in. A replace
+ * gives `Replaced`, the `Trade`s, then the old level, the consumed levels and
+ * the new level if a remainder rests there. Each touched level is reported
+ * once, even when the old and new level are the same. An
+ * immediate-or-cancel order that trades nothing gives `Accepted` and
+ * `Canceled` and no `L2Update`.
  */
 export type Event = {
   "type": "accepted";

@@ -12,6 +12,15 @@ use crate::{OrderId, OrderType, Price, Qty, Side};
 /// `L2Update`s. A replace produces `Replaced`, one `Trade` per matched maker
 /// if the new price crosses, and the resulting `L2Update`s; it is never
 /// `Accepted` again.
+///
+/// The order is fixed. A new order gives `Accepted`, the `Trade`s, `Canceled`
+/// for an unrested remainder, then one `L2Update` per touched level: the
+/// consumed levels in consumption order, then the level it rests in. A replace
+/// gives `Replaced`, the `Trade`s, then the old level, the consumed levels and
+/// the new level if a remainder rests there. Each touched level is reported
+/// once, even when the old and new level are the same. An
+/// immediate-or-cancel order that trades nothing gives `Accepted` and
+/// `Canceled` and no `L2Update`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -92,7 +101,11 @@ pub enum Event {
         /// Quantity that was still open.
         leaves_qty: Qty,
     },
-    /// The total resting quantity at one price level changed.
+    /// The total resting quantity at one price level.
+    ///
+    /// Reported whenever a command touched the level: usually because the
+    /// total changed, but a replace that changes nothing still reports its
+    /// level with the unchanged total.
     L2Update {
         /// Side of the level.
         side: Side,

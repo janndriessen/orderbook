@@ -217,7 +217,8 @@ impl Matcher {
     /// The events are `Replaced`, one `Trade` per fill (this order is the
     /// taker), then one `L2Update` per touched level carrying its final
     /// total: the order's old level, the consumed opposite levels in
-    /// consumption order, and the new level if a remainder rests there.
+    /// consumption order, and the new level if a remainder rests there. A
+    /// level is reported once when the old and new level are the same.
     ///
     /// Two requests are refused with a lone `CancelRejected` that leaves the
     /// book unchanged: an id that is not resting (`UnknownOrder`), and a
