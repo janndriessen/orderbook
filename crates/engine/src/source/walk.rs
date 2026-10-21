@@ -6,6 +6,7 @@ use protocol::{Command, OrderId, OrderType, Price, Qty, Side, TimeInForce, Ts};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+use super::Step;
 use super::book::{Order, RestingBook};
 
 /// Price in ticks that the first order of an empty book is placed at.
@@ -26,17 +27,6 @@ const SWEEP_ODDS: u32 = 16;
 /// Venue-time gap between two steps, in microseconds.
 const STEP_GAP_US: std::ops::RangeInclusive<Ts> = 20_000..=100_000;
 
-/// The command of one step, its venue time and the pause before the next one.
-#[derive(Debug)]
-pub struct Step {
-    /// The request to send to the matcher.
-    pub command: Command,
-    /// Venue time of the command.
-    pub ts: Ts,
-    /// How long a real-time consumer waits before asking for the next step.
-    pub wait: Duration,
-}
-
 /// A reproducible stream of order flow: limit orders placed around the
 /// touch, some canceled or replaced, and occasional takers.
 ///
@@ -54,6 +44,15 @@ pub struct RandomWalk {
     /// Side of the latest taker; the next one tends to repeat it.
     last_taker: Side,
     clock: Ts,
+}
+
+/// The walk never ends.
+impl Iterator for RandomWalk {
+    type Item = Step;
+
+    fn next(&mut self) -> Option<Step> {
+        Some(self.step())
+    }
 }
 
 impl RandomWalk {
