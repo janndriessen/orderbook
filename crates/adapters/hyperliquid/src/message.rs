@@ -306,6 +306,19 @@ mod tests {
     }
 
     #[test]
+    fn trade_addresses_are_not_kept() {
+        let payload = TRADES
+            .strip_prefix(r#"{"channel":"trades","data":"#)
+            .and_then(|text| text.strip_suffix('}'))
+            .expect("fixture has the expected envelope");
+        let data_first = format!(r#"{{"data":{payload},"channel":"trades"}}"#);
+        for text in [TRADES, data_first.as_str()] {
+            let parsed = format!("{:?}", parse(text));
+            assert!(!parsed.contains("0x"), "{parsed}");
+        }
+    }
+
+    #[test]
     fn unknown_fields_are_ignored() {
         let text = r#"{"channel":"trades","extra":1,"data":[{"coin":"BTC","side":"A","px":"1","sz":"1","time":1,"tid":7,"new":true}]}"#;
         assert!(matches!(parse(text), Message::Trades(t) if t.len() == 1));
