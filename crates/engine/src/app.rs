@@ -44,8 +44,9 @@ pub async fn run(
     // early return leaves neither running without a way to shut down. If the
     // source fails to start, the engine thread is already running; it exits on
     // its own once the dropped sender closes its command queue.
+    let (stop_source, source_stop) = std::sync::mpsc::channel();
     let engine = matcher::spawn(commands, event_queue)?;
-    let source = source::spawn(RandomWalk::new(seed, start_ts), command_queue)?;
+    let source = source::spawn(RandomWalk::new(seed, start_ts), command_queue, source_stop)?;
     let (handle, publisher) = publisher::spawn(market(), events, shutdown.clone());
 
     // The same seed gives the same command stream; timestamps start at launch time.
@@ -55,14 +56,17 @@ pub async fn run(
         .await;
 
     shutdown.cancel();
+    // Dropping the stop sender ends the source's pause, so it stops and closes
+    // the command queue, which ends the engine's receive. A source stuck on a
+    // full queue stops the other way round: the publisher has dropped the
+    // event receiver, so the engine's next send fails, it drops the command
+    // receiver and the source's send fails in turn.
+    drop(stop_source);
     let mut failed = false;
     if let Err(err) = publisher.await {
         error!(%err, "publisher task failed");
         failed = true;
     }
-    // The publisher dropped the event receiver, so the engine thread exits on
-    // its next send, which drops the command receiver and stops the source in
-    // turn.
     if !join_threads(vec![("engine", engine), ("source", source)]).await {
         failed = true;
     }

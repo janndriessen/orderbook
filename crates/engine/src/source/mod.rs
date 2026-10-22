@@ -8,6 +8,7 @@
 mod book;
 mod walk;
 
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ pub struct Step {
     pub command: Command,
     /// Venue time of the command.
     pub ts: Ts,
-    /// How long a real-time consumer waits before asking for the next step.
+    /// How long a real-time consumer waits before submitting the next step.
     pub wait: Duration,
 }
 
@@ -46,18 +47,24 @@ pub const COMMAND_QUEUE_CAPACITY: usize = 1024;
 /// The thread submits the flow's commands, with their venue times, to its own
 /// [`Gateway`] and sends those that pass to `queue` as numbered envelopes. A
 /// rejected command is logged and dropped; it never enters the event stream.
-/// The thread paces itself to the flow's venue clock. It stops when the flow
-/// ends, or on the first send of an accepted command after the receiving end
-/// of the queue was dropped. Stopping drops the sender, which closes the queue
-/// and lets the engine finish on its own.
+/// Before each step it pauses for the previous step's `wait`, so there is no
+/// pause after the last one, and a pause ends early once the sender of `stop`
+/// is dropped. The thread stops then, when the flow ends or when a send finds
+/// the queue closed; stopping closes the queue and lets the engine finish.
 pub fn spawn(
     flow: impl Iterator<Item = Step> + Send + 'static,
     queue: mpsc::Sender<Envelope<Command>>,
+    stop: Receiver<()>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().name("source".into()).spawn(move || {
         info!("source started");
         let mut gateway = Gateway::new();
+        let mut pause = Duration::ZERO;
         for step in flow {
+            // Anything but a timeout means the thread is asked to stop.
+            if !matches!(stop.recv_timeout(pause), Err(RecvTimeoutError::Timeout)) {
+                break;
+            }
             match gateway.submit(step.ts, step.command) {
                 // A full queue blocks here: backpressure, never a dropped command.
                 Ok(envelope) => {
@@ -67,7 +74,7 @@ pub fn spawn(
                 }
                 Err(reject) => warn!(%reject, command = ?step.command, "gateway rejected command"),
             }
-            thread::sleep(step.wait);
+            pause = step.wait;
         }
         debug!("source stopped");
     })
@@ -88,6 +95,7 @@ mod tests {
     use super::*;
 
     const WAIT: Duration = Duration::from_secs(5);
+    const HOUR: Duration = Duration::from_secs(3600);
 
     fn place(order_id: u64, ts: Ts) -> Step {
         Step {
@@ -113,7 +121,8 @@ mod tests {
     async fn a_rejected_step_leaves_no_gap_and_the_end_of_the_flow_closes_the_queue() {
         let flow = vec![place(1, 10), place(1, 20), place(2, 30)];
         let (tx, mut queue) = mpsc::channel(2);
-        let thread = spawn(flow.into_iter(), tx).expect("thread starts");
+        let (_stop, stop_rx) = std::sync::mpsc::channel();
+        let thread = spawn(flow.into_iter(), tx, stop_rx).expect("thread starts");
 
         let first = next(&mut queue).await.expect("first command passes");
         let second = next(&mut queue).await.expect("second command passes");
@@ -123,6 +132,41 @@ mod tests {
         assert!(matches!(second.body, Command::Place { order_id: 2, .. }));
         assert!(next(&mut queue).await.is_none());
         // The queue closes only as the thread returns, so this cannot block.
+        thread.join().expect("source thread does not panic");
+    }
+
+    #[tokio::test]
+    async fn an_idle_flow_stops_when_the_stop_sender_is_dropped() {
+        let flow = vec![
+            Step {
+                wait: HOUR,
+                ..place(1, 10)
+            },
+            place(2, 20),
+        ];
+        let (tx, mut queue) = mpsc::channel(2);
+        let (stop, stop_rx) = std::sync::mpsc::channel();
+        let thread = spawn(flow.into_iter(), tx, stop_rx).expect("thread starts");
+
+        assert!(next(&mut queue).await.is_some());
+        drop(stop);
+        assert!(next(&mut queue).await.is_none());
+        // The queue closes only as the thread returns, so this cannot block.
+        thread.join().expect("source thread does not panic");
+    }
+
+    #[tokio::test]
+    async fn the_last_step_is_not_followed_by_a_pause() {
+        let flow = vec![Step {
+            wait: HOUR,
+            ..place(1, 10)
+        }];
+        let (tx, mut queue) = mpsc::channel(2);
+        let (_stop, stop_rx) = std::sync::mpsc::channel();
+        let thread = spawn(flow.into_iter(), tx, stop_rx).expect("thread starts");
+
+        assert!(next(&mut queue).await.is_some());
+        assert!(next(&mut queue).await.is_none());
         thread.join().expect("source thread does not panic");
     }
 }
