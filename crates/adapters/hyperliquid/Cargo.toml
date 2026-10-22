@@ -1,0 +1,18 @@
+[package]
+name = "hyperliquid-adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Translates Hyperliquid market data into integer ticks and lots."
+
+[dependencies]
+protocol.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

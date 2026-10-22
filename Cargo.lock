@@ -751,6 +751,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperliquid-adapter"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

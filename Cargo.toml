@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+# Listed one by one: `crates/*` would also match `crates/adapters`, which holds
+# no manifest of its own, and fail to load.
+members = [
+  "crates/engine",
+  "crates/generator",
+  "crates/harness",
+  "crates/matching",
+  "crates/protocol",
+  "crates/adapters/*",
+]
 
 [workspace.package]
 edition = "2024"
