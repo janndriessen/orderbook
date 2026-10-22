@@ -56,9 +56,8 @@ struct Trade {
     qty: u64,
 }
 
-fn recorded(channel: &str) -> impl Iterator<Item = Value> + use<'_> {
-    FIXTURE
-        .lines()
+fn recorded<'a>(text: &'a str, channel: &'a str) -> impl Iterator<Item = Value> + use<'a> {
+    text.lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("fixture line"))
         .filter(move |value| value["channel"] == channel)
 }
@@ -76,8 +75,8 @@ fn side_levels(levels: &Value) -> Levels {
         .collect()
 }
 
-fn snapshots() -> Vec<Snapshot> {
-    let mut all: Vec<Snapshot> = recorded("l2Book")
+fn snapshots(text: &str) -> Vec<Snapshot> {
+    let mut all: Vec<Snapshot> = recorded(text, "l2Book")
         .map(|m| Snapshot {
             ts: m["data"]["time"].as_u64().expect("time") * 1_000,
             full: m["data"]["levels"]
@@ -93,8 +92,8 @@ fn snapshots() -> Vec<Snapshot> {
     all
 }
 
-fn trades() -> Vec<Trade> {
-    let mut all: Vec<Trade> = recorded("trades")
+fn trades(text: &str) -> Vec<Trade> {
+    let mut all: Vec<Trade> = recorded(text, "trades")
         .flat_map(|m| m["data"].as_array().expect("trades").clone())
         .map(|t| Trade {
             ts: t["time"].as_u64().expect("time") * 1_000,
@@ -115,12 +114,13 @@ fn book_levels(matcher: &Matcher, side: Side) -> Levels {
         .collect()
 }
 
-#[test]
-fn every_snapshot_is_rebuilt_exactly() {
-    let loaded = replayer::load(FIXTURE, &engine::market()).expect("load");
+/// Replays `text` and compares the matcher with every snapshot it holds;
+/// returns how many full and top snapshots were checked.
+fn check_every_snapshot(text: &str) -> (usize, usize) {
+    let loaded = replayer::load(text, &engine::market()).expect("load");
     let mut matcher = Matcher::new();
     let mut commands = loaded.commands.into_iter().peekable();
-    let snapshots = snapshots();
+    let snapshots = snapshots(text);
     // The replay starts at the first full snapshot.
     let start = snapshots
         .iter()
@@ -151,6 +151,12 @@ fn every_snapshot_is_rebuilt_exactly() {
             tops += 1;
         }
     }
+    (full, tops)
+}
+
+#[test]
+fn every_snapshot_is_rebuilt_exactly() {
+    let (full, tops) = check_every_snapshot(FIXTURE);
     println!("{full} full and {tops} top snapshots checked");
     assert!(full > 5 && tops > 5);
 }
@@ -161,16 +167,16 @@ fn every_snapshot_is_rebuilt_exactly() {
 /// side (an empty side changes nothing), and a trade takes its size off the
 /// level at its price on the side it hit. Events before the first full
 /// snapshot are ignored, as the replay drops them.
-fn expected_final_book() -> (Levels, Levels) {
+fn expected_final_book(text: &str) -> (Levels, Levels) {
     enum Event {
         Trade(Trade),
         Snapshot(Snapshot),
     }
-    let mut events: Vec<(u64, u8, Event)> = trades()
+    let mut events: Vec<(u64, u8, Event)> = trades(text)
         .into_iter()
         .map(|t| (t.ts, 0, Event::Trade(t)))
         .chain(
-            snapshots()
+            snapshots(text)
                 .into_iter()
                 .map(|s| (s.ts, 1, Event::Snapshot(s))),
         )
@@ -237,9 +243,10 @@ fn best(levels: &Levels, side: Side, depth: usize) -> Vec<(i64, u64)> {
     }
 }
 
-#[tokio::test]
-async fn the_feed_ends_on_the_source_book() {
-    let loaded = replayer::load(FIXTURE, &engine::market()).expect("load");
+/// Serves `text` through the engine and compares the feed's final book with
+/// the level model.
+async fn check_feed_end(text: &str) {
+    let loaded = replayer::load(text, &engine::market()).expect("load");
     // The flow waits for the client, so it cannot finish and close the
     // service before anyone is connected.
     let (start, started) = mpsc::channel::<()>();
@@ -305,8 +312,58 @@ async fn the_feed_ends_on_the_source_book() {
         .expect("service task")
         .expect("service result");
 
-    let (expected_bids, expected_asks) = expected_final_book();
+    let (expected_bids, expected_asks) = expected_final_book(text);
     assert!(updates > 0);
     assert_eq!(bids, expected_bids);
     assert_eq!(asks, expected_asks);
+}
+
+#[tokio::test]
+async fn the_feed_ends_on_the_source_book() {
+    check_feed_end(FIXTURE).await;
+}
+
+/// A full snapshot, a sell trade that reduces bid 100, then a top snapshot
+/// whose bid window (110 to 106) leaves bid 100 outside and whose ask window
+/// (up to 115) holds the stale asks 101 to 110, and a buy trade inside it.
+fn trade_outside_a_later_top_window() -> String {
+    let level = |price: u32, size: &str| format!(r#"{{"n":1,"px":"{price}.0","sz":"{size}"}}"#);
+    let side = |prices: std::ops::RangeInclusive<u32>| {
+        let levels: Vec<String> = prices.map(|price| level(price, "1.0")).collect();
+        levels.join(",")
+    };
+    let book = |time: u32, bids: String, asks: String| {
+        format!(
+            r#"{{"channel":"l2Book","data":{{"coin":"BTC","time":{time},"levels":[[{bids}],[{asks}]]}}}}"#
+        )
+    };
+    let trade = |time: u32, side: &str, price: u32, size: &str, tid: u32| {
+        format!(
+            r#"{{"channel":"trades","data":[{{"coin":"BTC","side":"{side}","px":"{price}.0","sz":"{size}","time":{time},"hash":"0x00","tid":{tid}}}]}}"#
+        )
+    };
+    let descending = |high: u32, low: u32| {
+        let levels: Vec<String> = (low..=high).rev().map(|p| level(p, "1.0")).collect();
+        levels.join(",")
+    };
+    [
+        book(1_000, descending(100, 81), side(101..=120)),
+        trade(1_100, "A", 100, "0.4", 1),
+        book(1_200, descending(110, 106), side(111..=115)),
+        trade(1_300, "B", 111, "0.5", 2),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+#[tokio::test]
+async fn a_trade_outside_a_later_top_window_stays_in_the_book() {
+    let text = trade_outside_a_later_top_window();
+    assert_eq!(check_every_snapshot(&text), (1, 1));
+    let (bids, asks) = expected_final_book(&text);
+    // Bid 100 keeps the reduction from the trade; ask 111 the later one.
+    assert_eq!(bids.get(&100), Some(&60_000));
+    assert_eq!(asks.get(&111), Some(&50_000));
+    assert_eq!(asks.keys().next(), Some(&111));
+    check_feed_end(&text).await;
 }
