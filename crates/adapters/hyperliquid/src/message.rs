@@ -13,6 +13,9 @@ use serde::Deserialize;
 use crate::decimal::MAX_VALUE;
 use crate::{DecimalError, parse_price, parse_qty};
 
+/// The Hyperliquid coin the BTC-USD market is built from.
+const COIN: &str = "BTC";
+
 /// One message from the WebSocket, tagged by its `channel`.
 ///
 /// A message on any other channel (subscription acknowledgements, `pong`,
@@ -78,8 +81,11 @@ pub enum TradeSide {
 }
 
 /// Why a wire value could not be converted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConvertError {
+    /// The message is for a coin other than `BTC`.
+    #[error("unexpected coin {0}")]
+    Coin(String),
     /// The `px` of a level or trade is not a valid price.
     #[error("invalid px: {0}")]
     Px(#[source] DecimalError),
@@ -103,8 +109,8 @@ pub struct BookLevel {
     pub orders: u64,
 }
 
-/// A book snapshot in integer form. Level order and shape, and the `coin` of
-/// the message, are taken from the wire unchecked.
+/// A book snapshot in integer form. Level order and shape are taken from the
+/// wire unchecked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookSnapshot {
     /// Snapshot time in microseconds.
@@ -130,6 +136,14 @@ pub struct Trade {
     pub tid: u64,
 }
 
+fn check_coin(coin: &str) -> Result<(), ConvertError> {
+    if coin == COIN {
+        Ok(())
+    } else {
+        Err(ConvertError::Coin(coin.to_string()))
+    }
+}
+
 fn micros(millis: u64) -> Result<Ts, ConvertError> {
     millis
         .checked_mul(1000)
@@ -152,6 +166,7 @@ impl WireBook {
     ///
     /// Returns a [`ConvertError`] naming the field that failed.
     pub fn to_snapshot(&self, market: &MarketInfo) -> Result<BookSnapshot, ConvertError> {
+        check_coin(&self.coin)?;
         let side = |levels: &[WireLevel]| -> Result<Vec<BookLevel>, ConvertError> {
             levels.iter().map(|l| level(l, market)).collect()
         };
@@ -170,6 +185,7 @@ impl WireTrade {
     ///
     /// Returns a [`ConvertError`] naming the field that failed.
     pub fn to_trade(&self, market: &MarketInfo) -> Result<Trade, ConvertError> {
+        check_coin(&self.coin)?;
         Ok(Trade {
             ts: micros(self.time)?,
             price: parse_price(&self.px, market).map_err(ConvertError::Px)?,
@@ -368,6 +384,22 @@ mod tests {
         assert_eq!(
             trade("0.5", "1", 1).to_trade(&market()),
             Err(ConvertError::Px(DecimalError::TooManyDecimals(0)))
+        );
+    }
+
+    #[test]
+    fn other_coins_are_rejected() {
+        let mut book = book_with(1, "1", "1");
+        book.coin = "ETH".to_string();
+        assert_eq!(
+            book.to_snapshot(&market()),
+            Err(ConvertError::Coin("ETH".into()))
+        );
+        let mut eth = trade("1", "1", 1);
+        eth.coin = "ETH".to_string();
+        assert_eq!(
+            eth.to_trade(&market()),
+            Err(ConvertError::Coin("ETH".into()))
         );
     }
 
