@@ -17,5 +17,10 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+futures-util.workspace = true
+matching.workspace = true
+tokio-tungstenite.workspace = true
+
 [lints]
 workspace = true
