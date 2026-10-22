@@ -10,8 +10,7 @@ use protocol::{MarketInfo, Price, Qty, Ts};
 
 use serde::Deserialize;
 
-use crate::decimal::MAX_VALUE;
-use crate::{DecimalError, parse_price, parse_qty};
+use crate::decimal::{DecimalError, MAX_VALUE, parse_price, parse_qty};
 
 /// The Hyperliquid coin the BTC-USD market is built from.
 const COIN: &str = "BTC";
@@ -348,7 +347,7 @@ mod tests {
         let book = book_with(1, "84579.0", "1e3");
         assert_eq!(
             book.to_snapshot(&market()),
-            Err(ConvertError::Sz(DecimalError::Exponent))
+            Err(ConvertError::Sz(DecimalError::Invalid))
         );
     }
 
@@ -364,7 +363,7 @@ mod tests {
         };
         assert_eq!(
             trade.to_trade(&market()),
-            Err(ConvertError::Sz(DecimalError::Sign))
+            Err(ConvertError::Sz(DecimalError::Invalid))
         );
     }
 

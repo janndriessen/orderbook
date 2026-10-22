@@ -7,7 +7,7 @@
 mod decimal;
 mod message;
 
-pub use decimal::{DecimalError, parse_price, parse_qty};
+pub use decimal::DecimalError;
 pub use message::{
     BookLevel, BookSnapshot, ConvertError, Message, Trade, TradeSide, WireBook, WireLevel,
     WireTrade,
