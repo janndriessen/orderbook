@@ -32,6 +32,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 engine = { path = "crates/engine" }
 futures-util = "0.3.34"
 generator = { path = "crates/generator" }
+hyperliquid-adapter = { path = "crates/adapters/hyperliquid" }
 matching = { path = "crates/matching" }
 protocol = { path = "crates/protocol" }
 rand = "0.10.3"

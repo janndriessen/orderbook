@@ -8,8 +8,7 @@ use anyhow::Context;
 use engine::RandomWalk;
 use protocol::Ts;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -28,17 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot listen on {addr}"))?;
 
-    let shutdown = CancellationToken::new();
-    tokio::spawn({
-        let shutdown = shutdown.clone();
-        async move {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => info!("shutting down"),
-                Err(err) => error!(%err, "cannot listen for ctrl-c, shutting down"),
-            }
-            shutdown.cancel();
-        }
-    });
+    let shutdown = engine::cancel_on_ctrl_c();
 
     // The same seed gives the same command stream; timestamps start at launch time.
     let start_ts = now_ts();

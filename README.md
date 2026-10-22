@@ -49,7 +49,9 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, exactly and without floats, bounded at the protocol's 2^53 - 1
   - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors; messages for other coins are rejected), converted to ticks, lots and microseconds
   - [x] `hyperliquid-adapter`: a `Translator` turns snapshots and trades into protocol commands through a shadow book of what the engine holds, with counters where it diverges from the source; not yet wired to a recording
-  - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed; not yet wired to a recording
+  - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed
+  - [x] `replay` binary: loads a recording (any other channel, malformed line or unconvertible value fails the load with its line number; a recording without a book snapshot is refused), drops the trades at or before the first snapshot (the backlog sent on subscribing, which the snapshot already reflects), translates the rest with the adapter's `Translator`, logs the translator's divergence counters, the dropped trades and recorded gaps over 60 s, and serves it through the engine; after the last command it keeps serving the final book until Ctrl-C
+  - [ ] Step mode of the replayer
   - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; a closed or lost connection, or 30 seconds without data, ends the run with an error, there is no reconnect
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
@@ -63,6 +65,7 @@ cargo test --workspace                   # also regenerates the TypeScript types
 cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
 cargo run -p harness --release --bin bench   # matcher throughput and cancel cost; release build only, numbers depend on the machine
 cargo run -p hyperliquid-recorder --bin record   # records live BTC book and trades from Hyperliquid to data/, until Ctrl-C
+REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # serves a recording through the engine
 ```
 
 The generated TypeScript files are committed; do not edit them by hand.
@@ -79,6 +82,8 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 | `ORDERBOOK_ADDR` | `127.0.0.1:8080` | Listen address                                               |
 | `ORDERBOOK_SEED` | clock-derived    | Seed of the random-walk order flow; the same seed gives the same command and event streams |
 | `RUST_LOG`       | `info`           | Log filter                                                   |
+| `REPLAY_PATH`    | required         | Recording that `replay` serves, as written by `record` |
+| `REPLAY_SPEED`   | `1`              | Playback speed of `replay`: `max`, or a positive integer factor (`1` is real time) |
 | `RECORD_PATH`    | `data/hyperliquid-btc-<unix seconds>.jsonl` | Output file of `record`; its directory is created if missing, and an existing file is never overwritten |
 | `RECORD_SECONDS` | run until Ctrl-C | Makes `record` stop after this many seconds; must be above zero |
 
@@ -92,7 +97,7 @@ crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's 
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
 crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends on protocol and matching (plus serde and compile-time thiserror, and serde_json in its tests); `translate` turns snapshots and trades into commands
 crates/adapters/hyperliquid-recorder/  `record` binary: records Hyperliquid's public BTC book and trades feed to a JSON Lines file; depends on tokio, tokio-tungstenite (rustls) and serde_json, not on the other crates
-crates/replayer/   paces recorded order flow for the service (real time, n times or maximum speed); depends on engine and protocol
+crates/replayer/   loads a recording into commands and paces them for the service (real time, n times or maximum speed); the `replay` binary serves a recording through the engine. The library depends on engine, protocol, the Hyperliquid adapter, serde_json, thiserror and tracing; the binary adds anyhow, tokio and tracing-subscriber
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams

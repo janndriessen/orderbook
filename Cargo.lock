@@ -1263,8 +1263,15 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "replayer"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "engine",
+ "hyperliquid-adapter",
  "protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

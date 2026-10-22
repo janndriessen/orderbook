@@ -7,8 +7,15 @@ publish.workspace = true
 description = "Plays recorded order flow into the order book service."
 
 [dependencies]
+anyhow.workspace = true
 engine.workspace = true
+hyperliquid-adapter.workspace = true
 protocol.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

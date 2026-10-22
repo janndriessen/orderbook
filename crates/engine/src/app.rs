@@ -24,6 +24,25 @@ pub fn market() -> MarketInfo {
     }
 }
 
+/// A shutdown token that is cancelled by Ctrl-C.
+///
+/// Spawns the task that waits for the signal, so it must be called inside a
+/// Tokio runtime. Both the signal and a failure to listen for it are logged.
+pub fn cancel_on_ctrl_c() -> CancellationToken {
+    let shutdown = CancellationToken::new();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => info!("shutting down"),
+                Err(err) => error!(%err, "cannot listen for ctrl-c, shutting down"),
+            }
+            shutdown.cancel();
+        }
+    });
+    shutdown
+}
+
 /// Runs the service on `listener` until `shutdown` fires or a component dies.
 ///
 /// Starts the source thread with the given order `flow`, the engine thread
