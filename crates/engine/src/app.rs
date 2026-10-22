@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::source::{self, RandomWalk};
+use crate::source::{self, Step};
 use crate::ws;
 use crate::{matcher, publisher};
 
@@ -26,9 +26,9 @@ pub fn market() -> MarketInfo {
 
 /// Runs the service on `listener` until `shutdown` fires or a component dies.
 ///
-/// Starts the source thread (random-walk order flow), the engine thread (the
-/// matcher), the publisher task and the WebSocket server, and waits for all of
-/// them to stop. Without a `seed` one is derived from the clock.
+/// Starts the source thread with the given order `flow`, the engine thread
+/// (the matcher), the publisher task and the WebSocket server, and waits for
+/// all of them to stop.
 ///
 /// Clients are pinged every `ping_interval` and dropped after a few silent
 /// intervals. A zero `ping_interval` is rejected with `InvalidInput` before
@@ -38,7 +38,7 @@ pub fn market() -> MarketInfo {
 /// the source panicked, so a supervisor can restart the process.
 pub async fn run(
     listener: TcpListener,
-    seed: Option<u64>,
+    flow: impl Iterator<Item = Step> + Send + 'static,
     shutdown: CancellationToken,
     ping_interval: Duration,
 ) -> io::Result<()> {
@@ -49,8 +49,6 @@ pub async fn run(
         ));
     }
     let addr = listener.local_addr()?;
-    let start_ts = source::now_ts();
-    let seed = seed.unwrap_or(start_ts);
     let (command_queue, commands) = mpsc::channel(source::COMMAND_QUEUE_CAPACITY);
     let (event_queue, events) = mpsc::channel(matcher::EVENT_QUEUE_CAPACITY);
     // Fallible steps come before the publisher and the server start, so an
@@ -59,11 +57,10 @@ pub async fn run(
     // its own once the dropped sender closes its command queue.
     let (stop_source, source_stop) = std::sync::mpsc::channel();
     let engine = matcher::spawn(commands, event_queue)?;
-    let source = source::spawn(RandomWalk::new(seed, start_ts), command_queue, source_stop)?;
+    let source = source::spawn(flow, command_queue, source_stop)?;
     let (handle, publisher) = publisher::spawn(market(), events, shutdown.clone());
 
-    // The same seed gives the same command stream; timestamps start at launch time.
-    info!(%addr, seed, "serving feed at /ws");
+    info!(%addr, "serving feed at /ws");
     let served = axum::serve(
         listener,
         ws::router(handle, shutdown.clone(), ping_interval),

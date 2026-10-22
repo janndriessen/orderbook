@@ -68,7 +68,7 @@ impl RandomWalk {
     }
 
     /// Advances the venue clock and produces the command of one action.
-    pub fn step(&mut self) -> Step {
+    pub(crate) fn step(&mut self) -> Step {
         let gap = self.rng.random_range(STEP_GAP_US);
         self.clock += gap;
 

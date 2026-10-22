@@ -4,8 +4,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use engine::{RandomWalk, Step};
 use futures_util::StreamExt;
-use protocol::FeedMessage;
+use protocol::{Command, FeedMessage};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -71,7 +72,7 @@ async fn start(ping_interval: Duration) -> (SocketAddr, CancellationToken, Serve
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(engine::run(
         listener,
-        Some(7),
+        RandomWalk::new(7, 0),
         shutdown.clone(),
         ping_interval,
     ));
@@ -154,10 +155,53 @@ async fn a_zero_ping_interval_is_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let result = timeout(
         WAIT,
-        engine::run(listener, Some(7), CancellationToken::new(), Duration::ZERO),
+        engine::run(
+            listener,
+            RandomWalk::new(7, 0),
+            CancellationToken::new(),
+            Duration::ZERO,
+        ),
     )
     .await
     .expect("run must return instead of serving");
     let err = result.expect_err("zero interval");
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn shutdown_stops_an_idle_flow() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let cancel = |order_id, wait| Step {
+        command: Command::Cancel { order_id },
+        ts: order_id,
+        wait,
+    };
+    let mut steps = vec![
+        cancel(1, Duration::from_secs(3600)),
+        cancel(2, Duration::ZERO),
+    ]
+    .into_iter();
+    // The source pulls the second step right before it pauses for the first
+    // step's hour-long wait, so this signal says it is about to idle.
+    let (pulled, second_pulled) = std::sync::mpsc::channel();
+    let mut count = 0;
+    let flow = std::iter::from_fn(move || {
+        count += 1;
+        if count == 2 {
+            let _ = pulled.send(());
+        }
+        steps.next()
+    });
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn(engine::run(
+        listener,
+        flow,
+        shutdown.clone(),
+        engine::PING_INTERVAL,
+    ));
+    tokio::task::spawn_blocking(move || second_pulled.recv_timeout(WAIT))
+        .await
+        .expect("wait task")
+        .expect("the source reaches the second step");
+    stop(shutdown, server).await;
 }

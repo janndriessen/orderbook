@@ -37,9 +37,10 @@ pub struct Step {
 /// The source waits when the queue is full instead of dropping commands, so
 /// the capacity only has to absorb hiccups downstream. It also backs up when
 /// the engine waits, which happens only once the publisher has fallen a full
-/// event queue behind. The size fits the random walk, which spaces commands
-/// 20 to 100 ms apart, so at most 50 and on average about 17 per second; 1024
-/// slots hold at least 20 seconds of its commands.
+/// event queue behind. The size suits the random walk's pace, which spaces
+/// commands 20 to 100 ms apart, so at most 50 and on average about 17 per
+/// second; 1024 slots hold at least 20 seconds of its commands. A faster flow
+/// simply waits on backpressure.
 pub const COMMAND_QUEUE_CAPACITY: usize = 1024;
 
 /// Starts the source thread.
@@ -78,13 +79,6 @@ pub fn spawn(
         }
         debug!("source stopped");
     })
-}
-
-/// Current wall-clock time as venue time, used only to start a walk.
-pub fn now_ts() -> Ts {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

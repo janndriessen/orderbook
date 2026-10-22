@@ -5,6 +5,8 @@
 //! `RUST_LOG` (log filter, default `info`).
 
 use anyhow::Context;
+use engine::RandomWalk;
+use protocol::Ts;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -38,6 +40,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    engine::run(listener, seed, shutdown, engine::PING_INTERVAL).await?;
+    // The same seed gives the same command stream; timestamps start at launch time.
+    let start_ts = now_ts();
+    let seed = seed.unwrap_or(start_ts);
+    info!(seed, "starting random-walk order flow");
+    let flow = RandomWalk::new(seed, start_ts);
+
+    engine::run(listener, flow, shutdown, engine::PING_INTERVAL).await?;
     Ok(())
+}
+
+/// Current wall-clock time as venue time, used only to start a walk.
+fn now_ts() -> Ts {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
