@@ -13,6 +13,13 @@ type Props = {
   /** Newest first. */
   entries: readonly LogEntry[];
   market: MarketInfo;
+  /**
+   * Changes when the feed's server restarted. A paused view is dropped then:
+   * the new log's sequence numbers start over below the frozen view's, which
+   * would hide every new event from the count. A resync from the same server
+   * keeps the pause.
+   */
+  restarts?: number;
 };
 
 const FILTERS: { value: LogFilter; label: string }[] = [
@@ -39,11 +46,15 @@ function newSince(
   };
 }
 
-export function FlowLog({ entries, market }: Props) {
+export function FlowLog({ entries, market, restarts = 0 }: Props) {
   const [filter, setFilter] = useState<LogFilter>("all");
   // While paused the list shows the entries held at the moment of pausing; the
   // feed keeps filling `entries`, so resuming loses nothing.
-  const [frozen, setFrozen] = useState<readonly LogEntry[] | null>(null);
+  const [held, setHeld] = useState<{
+    entries: readonly LogEntry[];
+    restarts: number;
+  } | null>(null);
+  const frozen = held?.restarts === restarts ? held.entries : null;
 
   const shown = (frozen ?? entries).filter((e) => matchesFilter(e, filter));
   const pending = frozen ? newSince(entries, frozen, filter) : null;
@@ -75,7 +86,7 @@ export function FlowLog({ entries, market }: Props) {
         <button
           type="button"
           className={styles.pause}
-          onClick={() => setFrozen(frozen ? null : entries)}
+          onClick={() => setHeld(frozen ? null : { entries, restarts })}
         >
           {frozen ? "Resume" : "Pause"}
         </button>

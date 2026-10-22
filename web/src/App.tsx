@@ -7,7 +7,7 @@ import { OrderBook } from "./components/OrderBook/OrderBook";
 import { useFeed } from "./feed/useFeed";
 
 export function App() {
-  const { status, book, market, log } = useFeed();
+  const { status, book, market, log, restarts } = useFeed();
   const [logOpen, setLogOpen] = useState(false);
 
   return (
@@ -24,7 +24,9 @@ export function App() {
       </main>
       <aside className={styles.logPane} inert={!logOpen} aria-label="Flow log">
         <div className={styles.logSlot}>
-          {market && <FlowLog entries={log} market={market} />}
+          {market && (
+            <FlowLog entries={log} market={market} restarts={restarts} />
+          )}
         </div>
       </aside>
       <FlowToggle open={logOpen} onToggle={() => setLogOpen((open) => !open)} />

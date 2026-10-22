@@ -143,6 +143,20 @@ describe("FlowLog", () => {
     expect(screen.queryByText(/new$/)).not.toBeInTheDocument();
   });
 
+  it("goes live again when the server restarts", async () => {
+    const user = userEvent.setup();
+    const high = logOf(accepted(100), trade(101));
+    const { rerender } = render(<FlowLog entries={high} market={market} />);
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+
+    // A restarted server numbers its events from 1 again.
+    const restarted = logOf(accepted(1), trade(2), canceled(3));
+    rerender(<FlowLog entries={restarted} market={market} restarts={1} />);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(items()).toHaveLength(3);
+    expect(screen.queryByText(/new$/)).not.toBeInTheDocument();
+  });
+
   it("counts only missed events that pass the filter", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<FlowLog entries={entries} market={market} />);

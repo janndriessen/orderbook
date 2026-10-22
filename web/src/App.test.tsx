@@ -69,6 +69,21 @@ describe("App", () => {
     expect(panel).toHaveAttribute("inert");
   });
 
+  it("keeps a paused flow log through a resync and ends the pause on a restart", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    deliver(snapshot({ seq: 5, events: [accepted(5)] }));
+    await user.click(screen.getByRole("button", { name: "Flow log" }));
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+
+    deliver(snapshot({ seq: 7, events: [accepted(6), accepted(7)] }));
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(screen.getByText("2 new")).toBeInTheDocument();
+
+    deliver(snapshot({ seq: 1, events: [accepted(1)] }));
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+  });
+
   it("keeps the flow log and its filter across a reconnect", async () => {
     const user = userEvent.setup();
     render(<App />);

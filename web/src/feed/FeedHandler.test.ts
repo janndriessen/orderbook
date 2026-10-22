@@ -81,6 +81,35 @@ describe("FeedHandler", () => {
     expect(state.log).toHaveLength(1);
   });
 
+  it("counts a snapshot with a lower sequence as a restart, not a resync", () => {
+    const { handler, last, waitForReconnect } = setup();
+    handler.start();
+    last().send(wire(snapshot({ seq: 5 })));
+    last().send(wire(update({ seq: 6 })));
+    last().drop();
+    waitForReconnect();
+    last().send(wire(snapshot({ seq: 6 })));
+    expect(handler.getState().restarts).toBe(0);
+    last().send(wire(update({ seq: 9 })));
+    waitForReconnect();
+    last().send(wire(snapshot({ seq: 20 })));
+    expect(handler.getState().restarts).toBe(0);
+    last().drop();
+    waitForReconnect();
+    last().send(wire(snapshot({ seq: 1 })));
+    expect(handler.getState().restarts).toBe(1);
+  });
+
+  it("starts clean when a stopped handler is started again", () => {
+    const { handler, last } = setup();
+    handler.start();
+    last().send(wire(snapshot({ seq: 5 })));
+    handler.stop();
+    handler.start();
+    last().send(wire(snapshot({ seq: 1 })));
+    expect(handler.getState().restarts).toBe(0);
+  });
+
   it("ignores a heartbeat: no state change, no notification", () => {
     const { handler, last } = setup();
     handler.start();

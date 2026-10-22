@@ -16,6 +16,13 @@ export type FeedState = {
   market: MarketInfo | null;
   /** Order-flow events, newest first. */
   log: readonly LogEntry[];
+  /**
+   * Server restarts seen since `start`. A snapshot whose sequence is below one
+   * already seen can only come from a server that began numbering again; a
+   * resync from the same server continues at or past it. Views that compare
+   * sequence numbers across updates reset when this changes.
+   */
+  restarts: number;
 };
 
 export type Connection = { close(): void };
@@ -59,6 +66,7 @@ const INITIAL: FeedState = {
   book: null,
   market: null,
   log: [],
+  restarts: 0,
 };
 
 export const webSocketTransport: Transport = (url, { onMessage, onClose }) => {
@@ -89,6 +97,7 @@ export class FeedHandler {
   #watchdog: ReturnType<typeof setTimeout> | null = null;
   #attempt = 0;
   #everLive = false;
+  #highSeq = 0;
   #running = false;
 
   readonly #url: string;
@@ -114,6 +123,7 @@ export class FeedHandler {
     this.#running = true;
     this.#attempt = 0;
     this.#everLive = false;
+    this.#highSeq = 0;
     this.#set(INITIAL);
     this.#open();
   }
@@ -180,11 +190,14 @@ export class FeedHandler {
       // with a gap must keep backing off, so the delay resets on an update.
       this.#attempt = 0;
     }
+    const restarted = snapshot && message.seq < this.#highSeq;
+    this.#highSeq = message.seq;
     this.#set({
       status: "live",
       book,
       market: snapshot ? message.market : this.#state.market,
       log: appendEvents(snapshot ? [] : this.#state.log, message.events),
+      restarts: this.#state.restarts + (restarted ? 1 : 0),
     });
   }
 
