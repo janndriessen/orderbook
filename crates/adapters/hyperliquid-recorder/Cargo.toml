@@ -1,0 +1,21 @@
+[package]
+name = "hyperliquid-recorder"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Records Hyperliquid's public BTC book and trades feed to a JSON Lines file."
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+# Only switches rustls's ring crypto provider on; it is never called directly.
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

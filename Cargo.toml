@@ -36,6 +36,7 @@ matching = { path = "crates/matching" }
 protocol = { path = "crates/protocol" }
 rand = "0.10.3"
 rand_chacha = "0.10.0"
+rustls = { version = "0.23.36", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

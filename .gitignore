@@ -6,7 +6,7 @@ node_modules/
 /web/dist/
 
 # Recorded market data
-/data/
+data/
 
 # Local environment
 .env
