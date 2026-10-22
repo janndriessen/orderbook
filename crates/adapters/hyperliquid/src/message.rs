@@ -219,7 +219,7 @@ mod tests {
         serde_json::from_str(text).expect("fixture parses")
     }
 
-    fn book_with(time: u64, px: &str, sz: &str) -> WireBook {
+    fn book_with(px: &str, sz: &str, time: u64) -> WireBook {
         WireBook {
             coin: "BTC".to_string(),
             time,
@@ -231,6 +231,17 @@ mod tests {
                 }],
                 vec![],
             ],
+        }
+    }
+
+    fn trade(px: &str, sz: &str, time: u64) -> WireTrade {
+        WireTrade {
+            coin: "BTC".to_string(),
+            side: TradeSide::B,
+            px: px.to_string(),
+            sz: sz.to_string(),
+            time,
+            tid: 1,
         }
     }
 
@@ -343,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_bad_price_in_one_level_fails_the_snapshot() {
-        let mut book = book_with(1, "84579.0", "1");
+        let mut book = book_with("84579.0", "1", 1);
         book.levels[1].push(WireLevel {
             px: "84580.5".to_string(),
             sz: "1".to_string(),
@@ -357,7 +368,7 @@ mod tests {
 
     #[test]
     fn a_bad_size_in_a_level_names_the_field() {
-        let book = book_with(1, "84579.0", "1e3");
+        let book = book_with("84579.0", "1e3", 1);
         assert_eq!(
             book.to_snapshot(&market()),
             Err(ConvertError::Sz(DecimalError::Invalid))
@@ -366,29 +377,11 @@ mod tests {
 
     #[test]
     fn a_bad_size_in_a_trade_names_the_field() {
-        let trade = WireTrade {
-            coin: "BTC".to_string(),
-            side: TradeSide::B,
-            px: "84580.0".to_string(),
-            sz: "-1".to_string(),
-            time: 1,
-            tid: 1,
-        };
+        let bad = trade("84580.0", "-1", 1);
         assert_eq!(
-            trade.to_trade(&market()),
+            bad.to_trade(&market()),
             Err(ConvertError::Sz(DecimalError::Invalid))
         );
-    }
-
-    fn trade(px: &str, sz: &str, time: u64) -> WireTrade {
-        WireTrade {
-            coin: "BTC".to_string(),
-            side: TradeSide::B,
-            px: px.to_string(),
-            sz: sz.to_string(),
-            time,
-            tid: 1,
-        }
     }
 
     #[test]
@@ -401,7 +394,7 @@ mod tests {
 
     #[test]
     fn other_coins_are_rejected() {
-        let mut book = book_with(1, "1", "1");
+        let mut book = book_with("1", "1", 1);
         book.coin = "ETH".to_string();
         assert_eq!(
             book.to_snapshot(&market()),
@@ -419,7 +412,7 @@ mod tests {
     fn time_is_accepted_up_to_the_protocol_bound() {
         // 9_007_199_254_740 ms is the largest whole millisecond below 2^53 µs.
         assert_eq!(
-            book_with(9_007_199_254_740, "1", "1")
+            book_with("1", "1", 9_007_199_254_740)
                 .to_snapshot(&market())
                 .map(|s| s.ts),
             Ok(9_007_199_254_740_000)
@@ -441,7 +434,7 @@ mod tests {
             u64::MAX,
         ] {
             assert_eq!(
-                book_with(time, "1", "1").to_snapshot(&market()),
+                book_with("1", "1", time).to_snapshot(&market()),
                 Err(ConvertError::TimeOverflow(time))
             );
             assert_eq!(
