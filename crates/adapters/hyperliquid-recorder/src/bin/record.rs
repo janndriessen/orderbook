@@ -7,9 +7,17 @@
 //!
 //! Every message is parsed and written back re-serialized (keys sorted), with
 //! any `users` field, which carries wallet addresses, removed at every depth.
-//! A message that is not valid JSON is dropped. A closed or lost connection,
-//! or 30 seconds without data, ends the run with an error: there is no
-//! reconnect, because a gap in a recording would be silent.
+//! The run ends with an error, and there is no reconnect because a gap in a
+//! recording would be silent, when:
+//!
+//! - the connection is closed or lost;
+//! - a text message is not valid JSON, which is never written;
+//! - no full book snapshot (more than 5 levels on a side) arrives for 30
+//!   seconds, which catches a stalled standard feed that the fast feed would
+//!   otherwise hide;
+//! - no book or trades message arrives for 30 seconds.
+//!
+//! Acknowledgements, `pong` replies and `error` messages count as neither.
 //!
 //! Settings come from the environment: `RECORD_PATH` (default
 //! `data/hyperliquid-btc-<unix seconds>.jsonl`; an existing file is never
@@ -33,13 +41,45 @@ use tracing_subscriber::EnvFilter;
 
 const URL: &str = "wss://api.hyperliquid.xyz/ws";
 
-/// How long the feed may stay silent before the connection counts as dead. The
-/// standard book updates about every 5 seconds.
+/// How long the market data may stay silent before the connection counts as
+/// dead, for both the full book snapshots (about every 5 seconds) and all
+/// market data together.
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
 
 /// How often the documented application-level ping is sent, so that an idle
 /// rule on the server side cannot close the connection.
 const PING_EVERY: Duration = Duration::from_secs(30);
+
+/// The most levels per side that a top-of-book snapshot carries.
+const TOP_DEPTH: usize = 5;
+
+/// What a received message is, as far as progress is concerned.
+#[derive(Debug, PartialEq, Eq)]
+enum Received {
+    /// A book snapshot deeper than the fast feed's.
+    FullBook,
+    /// A book snapshot of at most the fast feed's depth.
+    TopBook,
+    /// A trades message.
+    Trades,
+    /// Acknowledgements, `pong`, `error` and anything else.
+    Housekeeping,
+}
+
+fn classify(value: &Value) -> Received {
+    match value["channel"].as_str() {
+        Some("l2Book") => {
+            let depth = |side: usize| value["data"]["levels"][side].as_array().map_or(0, Vec::len);
+            if depth(0).max(depth(1)) > TOP_DEPTH {
+                Received::FullBook
+            } else {
+                Received::TopBook
+            }
+        }
+        Some("trades") => Received::Trades,
+        _ => Received::Housekeeping,
+    }
+}
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -64,9 +104,10 @@ async fn record(
     limit: Option<Duration>,
 ) -> anyhow::Result<()> {
     let stop = sleep(limit.unwrap_or(Duration::MAX));
-    let idle = sleep(IDLE_LIMIT);
+    let book_idle = sleep(IDLE_LIMIT);
+    let data_idle = sleep(IDLE_LIMIT);
     let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(stop, idle, ctrl_c);
+    tokio::pin!(stop, book_idle, data_idle, ctrl_c);
     let mut ping = interval_at(Instant::now() + PING_EVERY, PING_EVERY);
     let mut lines = 0u64;
     loop {
@@ -76,17 +117,24 @@ async fn record(
                 signal.context("cannot listen for ctrl-c")?;
                 return Ok(());
             }
-            () = &mut idle => bail!("no data for {IDLE_LIMIT:?} after {lines} lines"),
+            () = &mut book_idle => {
+                bail!("no full book snapshot for {IDLE_LIMIT:?} after {lines} lines")
+            }
+            () = &mut data_idle => bail!("no market data for {IDLE_LIMIT:?} after {lines} lines"),
             _ = ping.tick() => {
                 socket.send(Message::text(json!({"method": "ping"}).to_string())).await?;
             }
             received = socket.next() => match received {
                 Some(Ok(Message::Text(text))) => {
-                    idle.as_mut().reset(Instant::now() + IDLE_LIMIT);
-                    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
-                        warn!("dropped a message that is not valid JSON");
-                        continue;
-                    };
+                    let mut value = serde_json::from_str::<Value>(&text)
+                        .with_context(|| format!("message after {lines} lines is not valid JSON"))?;
+                    let received = classify(&value);
+                    if received != Received::Housekeeping {
+                        data_idle.as_mut().reset(Instant::now() + IDLE_LIMIT);
+                    }
+                    if received == Received::FullBook {
+                        book_idle.as_mut().reset(Instant::now() + IDLE_LIMIT);
+                    }
                     strip_users(&mut value);
                     if value["channel"] == "error" {
                         warn!(%value, "server reported an error");
@@ -167,6 +215,30 @@ mod tests {
 
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).expect("test input is valid JSON")
+    }
+
+    #[test]
+    fn messages_are_classified_by_channel_and_book_depth() {
+        let book = |depth: usize, other: usize| {
+            let side = |n: usize| vec![json!({"px": "1", "sz": "1", "n": 1}); n];
+            json!({"channel": "l2Book", "data": {"coin": "BTC", "levels": [side(depth), side(other)]}})
+        };
+        assert_eq!(classify(&book(20, 20)), Received::FullBook);
+        assert_eq!(classify(&book(5, 6)), Received::FullBook);
+        assert_eq!(classify(&book(5, 5)), Received::TopBook);
+        assert_eq!(classify(&book(0, 0)), Received::TopBook);
+        assert_eq!(
+            classify(&json!({"channel": "trades", "data": []})),
+            Received::Trades
+        );
+        for housekeeping in [
+            json!({"channel": "pong"}),
+            json!({"channel": "subscriptionResponse", "data": {}}),
+            json!({"channel": "error", "data": "x"}),
+            json!({}),
+        ] {
+            assert_eq!(classify(&housekeeping), Received::Housekeeping);
+        }
     }
 
     #[test]
