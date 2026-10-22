@@ -137,6 +137,9 @@ pub struct Loaded {
     pub divergence: Divergence,
     /// Trades at or before the first snapshot's time, which were left out.
     pub dropped_trades: usize,
+    /// Whether the last line was cut off and left out, as happens while the
+    /// recorder is still writing.
+    pub incomplete_last_line: bool,
 }
 
 /// A recorded book or trade, ready to be translated.
@@ -165,11 +168,17 @@ impl Recorded {
 /// snapshot's time are dropped: the first trades message after subscribing is
 /// a backlog, and a snapshot already reflects every trade up to its time.
 ///
+/// A recording that does not end with a line break may end in the middle of a
+/// line, because the recorder writes in blocks while it runs; such a last line
+/// is left out when it does not parse.
+///
 /// # Errors
 ///
 /// Returns a [`LoadError`] for the first line that is malformed, on another
 /// channel, or not convertible, or if the recording has no snapshot.
 pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
+    let unfinished_line = (!recording.ends_with('\n')).then(|| recording.lines().count());
+    let mut incomplete_last_line = false;
     let mut recorded = Vec::new();
     for (index, text) in recording.lines().enumerate() {
         let line = index + 1;
@@ -177,7 +186,14 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
             continue;
         }
         let parse = |source| LoadError::Parse { line, source };
-        let value: serde_json::Value = serde_json::from_str(text).map_err(parse)?;
+        let value: serde_json::Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(_) if Some(line) == unfinished_line => {
+                incomplete_last_line = true;
+                continue;
+            }
+            Err(source) => return Err(parse(source)),
+        };
         let channel = value.get("channel").and_then(|c| c.as_str());
         if matches!(channel, Some("subscriptionResponse" | "pong")) {
             continue;
@@ -222,6 +238,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         commands,
         divergence: translator.divergence(),
         dropped_trades,
+        incomplete_last_line,
     })
 }
 
@@ -335,10 +352,12 @@ mod tests {
     const TRADE: &str = r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"84001.0","sz":"0.2","time":2000,"tid":2}]}"#;
 
     /// The trade is written after the snapshot that reflects it; line 4 is empty.
+    /// A finished recording: like the recorder's output, every line ends with
+    /// a line break.
     fn recording(extra: &[&str]) -> String {
         let mut lines = vec![ACK, BACKLOG, FIRST, "", PONG, SECOND, TRADE];
         lines.extend(extra);
-        lines.join("\n")
+        lines.iter().map(|line| format!("{line}\n")).collect()
     }
 
     #[test]
@@ -399,6 +418,36 @@ mod tests {
             load(bad_data, &engine::market()),
             Err(LoadError::Parse { line: 1, .. })
         ));
+    }
+
+    #[test]
+    fn a_cut_off_last_line_is_left_out_while_the_file_is_unfinished() {
+        let complete = load(&recording(&[]), &engine::market()).unwrap();
+        assert!(!complete.incomplete_last_line);
+
+        let unfinished = recording(&[]) + &SECOND[..40];
+        let loaded = load(&unfinished, &engine::market()).unwrap();
+        assert!(loaded.incomplete_last_line);
+        assert_eq!(loaded.commands, complete.commands);
+
+        // A finished file, or a cut-off line followed by more lines, is still
+        // an error.
+        let finished = format!("{unfinished}\n");
+        assert!(matches!(
+            load(&finished, &engine::market()),
+            Err(LoadError::Parse { line: 8, .. })
+        ));
+        let in_the_middle = format!("{unfinished}\n{PONG}");
+        assert!(matches!(
+            load(&in_the_middle, &engine::market()),
+            Err(LoadError::Parse { line: 8, .. })
+        ));
+
+        // A last line without a line break that parses is used as usual.
+        let no_break = recording(&[]).trim_end().to_owned();
+        let loaded = load(&no_break, &engine::market()).unwrap();
+        assert!(!loaded.incomplete_last_line);
+        assert_eq!(loaded.commands, complete.commands);
     }
 
     #[test]

@@ -42,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
         divergence = ?loaded.divergence,
         "recording loaded"
     );
+    if loaded.incomplete_last_line {
+        warn!("the last line is incomplete and was left out; is the recorder still running?");
+    }
     for (index, gap) in long_waits(&loaded.commands, LONG_WAIT) {
         warn!(index, ?gap, "long gap after this command in the recording");
     }
