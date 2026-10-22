@@ -56,8 +56,9 @@ export const HEARTBEAT_INTERVAL_MS = 1_000;
 export const SILENCE_TIMEOUT_MS =
   3 * HEARTBEAT_INTERVAL_MS + HEARTBEAT_INTERVAL_MS / 2;
 /**
- * Time a new socket gets to deliver its first message (handshake plus
- * snapshot), so a slow link still connects while a hung attempt is caught.
+ * Time a new socket gets to deliver its first snapshot (handshake plus
+ * snapshot), whatever else it sends meanwhile, so a slow link still connects
+ * while a hung attempt is caught.
  */
 export const CONNECT_TIMEOUT_MS = 10_000;
 
@@ -81,7 +82,7 @@ export const webSocketTransport: Transport = (url, { onMessage, onClose }) => {
  * exchange client's feed handler does (not a DOM event callback): it applies
  * the initial snapshot and each sequenced update, and when it sees a sequence
  * gap, a malformed message, a closed socket or a silent one (no message, not
- * even a heartbeat, for `SILENCE_TIMEOUT_MS`, or none at all for
+ * even a heartbeat, for `SILENCE_TIMEOUT_MS`, or no snapshot within
  * `CONNECT_TIMEOUT_MS` after opening) it throws the local book away
  * and reconnects with capped, jittered exponential backoff. A fresh connection
  * always starts with a snapshot, so recovery needs no replay logic.
@@ -142,8 +143,10 @@ export class FeedHandler {
     const connection: Connection = this.#transport(this.#url, {
       onMessage: (data) => {
         if (this.#connection !== connection) return;
-        this.#arm(SILENCE_TIMEOUT_MS);
         this.#receive(data);
+        // Before the first snapshot only the connect deadline runs, so a peer
+        // that sends nothing but heartbeats cannot stay "connecting".
+        if (this.#state.book) this.#arm(SILENCE_TIMEOUT_MS);
       },
       onClose: () => {
         if (this.#connection === connection) this.#recover();

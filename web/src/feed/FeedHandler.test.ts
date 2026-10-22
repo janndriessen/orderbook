@@ -166,6 +166,35 @@ describe("FeedHandler", () => {
       expect(sockets).toHaveLength(2);
     });
 
+    it("drops a socket that sends only heartbeats before any snapshot", () => {
+      const { handler, sockets, last, waitForReconnect } = setup();
+      handler.start();
+      const first = last();
+      for (let i = 0; i < 9; i++) {
+        vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+        first.send(beat);
+      }
+      expect(first.closed).toBe(false);
+      vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 9 * HEARTBEAT_INTERVAL_MS);
+      expect(first.closed).toBe(true);
+      expect(handler.getState().status).toBe("connecting");
+      waitForReconnect();
+      expect(sockets).toHaveLength(2);
+    });
+
+    it("keeps a socket whose snapshot arrives within the connect window", () => {
+      const { handler, sockets, last } = setup();
+      handler.start();
+      vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1);
+      last().send(wire(snapshot()));
+      for (let i = 0; i < 3; i++) {
+        vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+        last().send(beat);
+      }
+      expect(handler.getState().status).toBe("live");
+      expect(sockets).toHaveLength(1);
+    });
+
     it("reports reconnecting when a live feed goes silent", () => {
       const { handler, last } = setup();
       handler.start();
