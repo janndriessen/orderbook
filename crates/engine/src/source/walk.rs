@@ -67,8 +67,10 @@ impl RandomWalk {
         }
     }
 
-    /// Advances the venue clock and produces the command of one action.
+    /// Produces the command of one action at the current venue time and moves
+    /// the clock on to the next step; the step's `wait` is that gap.
     pub(crate) fn step(&mut self) -> Step {
+        let ts = self.clock;
         let gap = self.rng.random_range(STEP_GAP_US);
         self.clock += gap;
 
@@ -81,7 +83,7 @@ impl RandomWalk {
         };
         Step {
             command,
-            ts: self.clock,
+            ts,
             wait: Duration::from_micros(gap),
         }
     }
@@ -469,6 +471,16 @@ mod tests {
         assert!(has(|e| matches!(e, Event::Trade { .. })));
         assert!(has(|e| matches!(e, Event::Replaced { .. })));
         assert!(has(|e| matches!(e, Event::Canceled { .. })));
+    }
+
+    #[test]
+    fn each_wait_is_the_gap_to_the_next_step() {
+        let mut walk = RandomWalk::new(3, 1_000);
+        let steps: Vec<Step> = (0..500).map(|_| walk.step()).collect();
+        assert_eq!(steps[0].ts, 1_000);
+        for pair in steps.windows(2) {
+            assert_eq!(pair[0].wait, Duration::from_micros(pair[1].ts - pair[0].ts));
+        }
     }
 
     #[test]
