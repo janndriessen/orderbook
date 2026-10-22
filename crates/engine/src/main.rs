@@ -38,6 +38,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    engine::run(listener, seed, shutdown).await?;
+    engine::run(listener, seed, shutdown, engine::PING_INTERVAL).await?;
     Ok(())
 }

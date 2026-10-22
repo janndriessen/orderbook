@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::io;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use protocol::MarketInfo;
 use tokio::net::TcpListener;
@@ -11,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::source::{self, RandomWalk};
-use crate::{matcher, publisher, ws};
+use crate::ws;
+use crate::{matcher, publisher};
 
 /// The market the service publishes.
 pub fn market() -> MarketInfo {
@@ -28,13 +30,24 @@ pub fn market() -> MarketInfo {
 /// matcher), the publisher task and the WebSocket server, and waits for all of
 /// them to stop. Without a `seed` one is derived from the clock.
 ///
+/// Clients are pinged every `ping_interval` and dropped after a few silent
+/// intervals. A zero `ping_interval` is rejected with `InvalidInput` before
+/// anything starts.
+///
 /// Returns an error if the server failed or if the publisher, the engine or
 /// the source panicked, so a supervisor can restart the process.
 pub async fn run(
     listener: TcpListener,
     seed: Option<u64>,
     shutdown: CancellationToken,
+    ping_interval: Duration,
 ) -> io::Result<()> {
+    if ping_interval.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ping interval must be greater than zero",
+        ));
+    }
     let addr = listener.local_addr()?;
     let start_ts = source::now_ts();
     let seed = seed.unwrap_or(start_ts);
@@ -51,9 +64,12 @@ pub async fn run(
 
     // The same seed gives the same command stream; timestamps start at launch time.
     info!(%addr, seed, "serving feed at /ws");
-    let served = axum::serve(listener, ws::router(handle, shutdown.clone()))
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .await;
+    let served = axum::serve(
+        listener,
+        ws::router(handle, shutdown.clone(), ping_interval),
+    )
+    .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+    .await;
 
     shutdown.cancel();
     // Dropping the stop sender ends the source's pause, so it stops and closes

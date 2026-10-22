@@ -6,16 +6,24 @@
 //! updates behind, or a single send takes longer than `SEND_TIMEOUT`. The
 //! client reconnects and starts again from a fresh snapshot, as the feed
 //! protocol prescribes.
+//!
+//! Liveness: the server pings every client each ping interval and drops one
+//! that has sent nothing, not even a pong, for `MISSED_PINGS` intervals.
+//! Silence is checked only when a ping is due, so a vanished peer is dropped
+//! between `MISSED_PINGS` and `MISSED_PINGS + 1` intervals after the last frame
+//! it sent, which waiting for writes to back up does not bound. Browsers
+//! answer pings on their own.
 
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::time::timeout;
+use tokio::time::{Instant, MissedTickBehavior, interval_at, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -24,19 +32,28 @@ use crate::publisher::{self, Frame, Handle};
 /// Longest a single send to a client may take before the client is dropped.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Default time between pings to each client. With `MISSED_PINGS` this drops
+/// a vanished client 15 to 20 s after the last frame it sent.
+pub const PING_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Ping intervals of silence after which a client is dropped.
+const MISSED_PINGS: u32 = 3;
+
 #[derive(Clone)]
 struct AppState {
     publisher: Handle,
     shutdown: CancellationToken,
+    ping_interval: Duration,
 }
 
 /// Builds the router: the feed at `/ws`.
-pub fn router(publisher: Handle, shutdown: CancellationToken) -> Router {
+pub fn router(publisher: Handle, shutdown: CancellationToken, ping_interval: Duration) -> Router {
     Router::new()
         .route("/ws", get(upgrade))
         .with_state(AppState {
             publisher,
             shutdown,
+            ping_interval,
         })
 }
 
@@ -49,16 +66,26 @@ async fn serve_client(mut socket: WebSocket, state: AppState) {
         return;
     };
     let mut updates = subscription.updates;
-    if !send(&mut socket, publisher::encode(&subscription.snapshot)).await {
+    if !send(
+        &mut socket,
+        Message::Text(publisher::encode(&subscription.snapshot)),
+    )
+    .await
+    {
         return;
     }
 
+    let interval = state.ping_interval;
+    let silence = interval * MISSED_PINGS;
+    let mut pings = interval_at(Instant::now() + interval, interval);
+    pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heard = Instant::now();
     loop {
         tokio::select! {
             () = state.shutdown.cancelled() => break,
             update = updates.recv() => match on_update(update) {
                 Next::Send(frame) => {
-                    if !send(&mut socket, frame).await {
+                    if !send(&mut socket, Message::Text(frame)).await {
                         break;
                     }
                 }
@@ -66,9 +93,19 @@ async fn serve_client(mut socket: WebSocket, state: AppState) {
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                // Pings are answered by the library; the feed takes no input.
-                Some(Ok(_)) => {}
+                // Pings are answered by the library; the feed takes no input,
+                // so any frame only shows the peer is alive.
+                Some(Ok(_)) => last_heard = Instant::now(),
             },
+            _ = pings.tick() => {
+                if last_heard.elapsed() >= silence {
+                    warn!(?silence, "client silent, disconnecting");
+                    break;
+                }
+                if !send(&mut socket, Message::Ping(Bytes::new())).await {
+                    break;
+                }
+            }
         }
     }
     // Best effort: the peer may already be gone or stuck.
@@ -98,9 +135,9 @@ fn on_update(update: Result<Frame, RecvError>) -> Next {
     }
 }
 
-/// Sends one frame; `false` when the client must be dropped, after logging why.
-async fn send(socket: &mut WebSocket, frame: Frame) -> bool {
-    match timeout(SEND_TIMEOUT, socket.send(Message::Text(frame))).await {
+/// Sends one message; `false` when the client must be dropped, after logging why.
+async fn send(socket: &mut WebSocket, message: Message) -> bool {
+    match timeout(SEND_TIMEOUT, socket.send(message)).await {
         Ok(Ok(())) => true,
         Ok(Err(err)) => {
             debug!(%err, "send failed, disconnecting");

@@ -16,3 +16,4 @@ mod source;
 mod ws;
 
 pub use app::run;
+pub use ws::PING_INTERVAL;
