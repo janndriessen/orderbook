@@ -46,6 +46,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] Benchmark: `cargo run -p harness --release --bin bench` measures throughput and cancel cost (results under the price-levels trade-off)
   - [x] Level totals: left unbounded on purpose, since real BTC flow stays far below 2^53 (see the trade-offs)
 - [ ] Hyperliquid adapter and replayer
+  - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, with checked arithmetic and the protocol's 2^53 - 1 bound
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
 
@@ -82,12 +83,13 @@ crates/matching/   order book, limit- and market-order matching, cancel and repl
 crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
+crates/adapters/hyperliquid/  Hyperliquid adapter (library): decimal strings to ticks and lots; depends only on protocol (plus compile-time thiserror)
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
 ```
 
-Planned, not yet present: `crates/adapters`, `crates/replayer` and `data/` (recorded sessions, gitignored).
+Planned, not yet present: `crates/replayer` and `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 
