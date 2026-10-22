@@ -84,7 +84,7 @@ crates/matching/   order book, limit- and market-order matching, cancel and repl
 crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
-crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends only on protocol (plus serde, serde_json and compile-time thiserror)
+crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends only on protocol (plus serde and compile-time thiserror, and serde_json in its tests)
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
