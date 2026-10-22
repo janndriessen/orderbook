@@ -5,8 +5,9 @@
 //! made by `record`), `REPLAY_SPEED` (`max`, or a positive integer factor;
 //! default `1`, real time), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`) and
 //! `RUST_LOG` (log filter, default `info`). When the recording ends the
-//! final book stays served until Ctrl-C. Trades at or before the first
-//! snapshot are dropped, and a recording without a snapshot is refused.
+//! final book stays served until Ctrl-C. The replay starts at the first full
+//! book snapshot: trades at or before it and top-of-book snapshots before it
+//! are dropped, and a recording without a full snapshot is refused.
 
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         commands = loaded.commands.len(),
         dropped_trades = loaded.dropped_trades,
+        dropped_top_snapshots = loaded.dropped_top_snapshots,
         divergence = ?loaded.divergence,
         "recording loaded"
     );

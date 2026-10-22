@@ -1,6 +1,10 @@
 //! The `record` binary: writes the live BTC book and trades from Hyperliquid's
 //! public WebSocket to a JSON Lines file, one received message per line.
 //!
+//! Two book feeds are subscribed: the standard one, 20 levels per side about
+//! every 5 seconds, and the fast one, 5 levels per side about every half
+//! second. Their messages have the same shape; only the depth tells them apart.
+//!
 //! Every message is parsed and written back re-serialized (keys sorted), with
 //! any `users` field, which carries wallet addresses, removed at every depth.
 //! A message that is not valid JSON is dropped. A closed or lost connection,
@@ -30,7 +34,7 @@ use tracing_subscriber::EnvFilter;
 const URL: &str = "wss://api.hyperliquid.xyz/ws";
 
 /// How long the feed may stay silent before the connection counts as dead. The
-/// book updates about every 5 seconds.
+/// standard book updates about every 5 seconds.
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
 
 /// How often the documented application-level ping is sent, so that an idle
@@ -125,8 +129,13 @@ async fn main() -> anyhow::Result<()> {
     let (mut socket, _) = connect_async(URL)
         .await
         .with_context(|| format!("cannot connect to {URL}"))?;
-    for kind in ["l2Book", "trades"] {
-        let request = json!({"method": "subscribe", "subscription": {"type": kind, "coin": "BTC"}});
+    let subscriptions = [
+        json!({"type": "l2Book", "coin": "BTC"}),
+        json!({"type": "l2Book", "coin": "BTC", "fast": true}),
+        json!({"type": "trades", "coin": "BTC"}),
+    ];
+    for subscription in subscriptions {
+        let request = json!({"method": "subscribe", "subscription": subscription});
         socket.send(Message::text(request.to_string())).await?;
     }
 

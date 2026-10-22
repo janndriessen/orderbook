@@ -48,12 +48,18 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [ ] Hyperliquid adapter and replayer
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, exactly and without floats, bounded at the protocol's 2^53 - 1
   - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors; messages for other coins are rejected), converted to ticks, lots and microseconds
-  - [x] `hyperliquid-adapter`: a `Translator` turns snapshots and trades into protocol commands through a shadow book of what the engine holds, with counters where it diverges from the source; not yet wired to a recording
+  - [x] `hyperliquid-adapter`: a `Translator` turns full snapshots (20 levels per side, about every 5 s), top-of-book snapshots (5 levels per side, about every 0.5 s; only the price window they span is mirrored) and trades into protocol commands through a shadow book of what the engine holds, with counters where it diverges from the source; not yet wired to a recording
   - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed
-  - [x] `replay` binary: loads a recording (any other channel, malformed line or unconvertible value fails the load with its line number, except a cut-off last line of a recording still being written, which is left out with a warning; a recording without a book snapshot is refused), drops the trades at or before the first snapshot (the backlog sent on subscribing, which the snapshot already reflects), translates the rest with the adapter's `Translator`, logs the translator's divergence counters, the dropped trades and recorded gaps over 60 s, and serves it through the engine; after the last command it keeps serving the final book until Ctrl-C
-  - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against 40 s of recorded public BTC data: after replaying it, the matcher's book equals every recorded snapshot exactly, and the feed of the running service, followed from its snapshot to the end of the flow, ends on the source's last book with the later trades applied
+  - [x] `replay` binary: loads a recording and serves it through the engine
+    - a line on another channel, a malformed line or an unconvertible value fails the load with its line number; a cut-off last line of a recording still being written is left out with a warning
+    - a snapshot with at most 5 levels per side is a top snapshot, a deeper one a full snapshot; a recording without a full snapshot is refused
+    - the replay starts at the first full snapshot: the trades at or before it (the backlog sent on subscribing, which the snapshot already reflects) and the top snapshots before it are dropped
+    - the rest is translated with the adapter's `Translator`
+    - logs the translator's divergence counters, the dropped trades and top snapshots, and recorded gaps over 60 s
+    - after the last command it keeps serving the final book until Ctrl-C
+  - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against 40 s of recorded public BTC data: after replaying it, the matcher's book equals every recorded full snapshot exactly and the top 5 levels per side equal every recorded top snapshot, and the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots and trades in time order
   - [ ] Step mode of the replayer
-  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; a closed or lost connection, or 30 seconds without data, ends the run with an error, there is no reconnect
+  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (both the standard and the fast feed) and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; a closed or lost connection, or 30 seconds without data, ends the run with an error, there is no reconnect
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
 
@@ -65,7 +71,7 @@ The pinned toolchain (Rust 1.99.1, see `rust-toolchain.toml`) is installed autom
 cargo test --workspace                   # also regenerates the TypeScript types in web/src/protocol/ and checks a replayed recording against the source's books
 cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
 cargo run -p harness --release --bin bench   # matcher throughput and cancel cost; release build only, numbers depend on the machine
-cargo run -p hyperliquid-recorder --bin record   # records live BTC book and trades from Hyperliquid to data/, until Ctrl-C
+cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard and fast feed) and trades from Hyperliquid to data/, until Ctrl-C
 REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # serves a recording through the engine
 ```
 
@@ -123,6 +129,6 @@ Planned, not yet present: `data/` (recorded sessions, gitignored).
 - **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids in the engine, which answers cancels; the gateway keeps such a record but never sees whether an order filled.
 - **Order flow:** a seeded random walk generates the commands: GTC limits around the touch, cancels, replaces and IOC takers that never exceed the touch, which the real matcher turns into events. It therefore never produces a `Canceled` IOC remainder or a reject.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
-- **Replayed book:** synthetic orders are placed one per growth of a level, so a level's order count differs from the source's `n` and can exceed it. Every level missing from a snapshot is canceled, which mirrors its top 20. Snapshots arrive about 5 s apart, so changes between them show up only as trades. Post-only makers never produce trades; trades come only from the source's trades, as IOC orders, which can fill at a better price than the source's when the shadow book is stale (`off_price_fill_qty`).
+- **Replayed book:** synthetic orders are placed one per growth of a level, so a level's order count differs from the source's `n` and can exceed it. Every level missing from a snapshot is canceled, which mirrors its window: the top 5 levels per side are refreshed about every 0.5 s from the fast feed and the top 20 about every 5 s, so deeper levels go stale in between and changes between snapshots show up only as trades. Post-only makers never produce trades; trades come only from the source's trades, as IOC orders, which can fill at a better price than the source's when the shadow book is stale (`off_price_fill_qty`). A full snapshot of a book with at most 5 levels per side cannot be told from a top snapshot: it is mirrored only inside its window, so stale levels beyond it, or on a side that is empty in it, stay until the next full snapshot, and the stale side can make new orders on the other side be rejected (`rejected_makers`).
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.
 - **Infrastructure:** a small shared-vCPU cloud server. Production uses dedicated hardware, often co-located, with tuned networking.

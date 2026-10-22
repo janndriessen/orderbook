@@ -11,7 +11,7 @@ use matching::{Matcher, OrderBook};
 use protocol::{Command, Event, OrderId, OrderType, Price, Qty, Side, TimeInForce, Ts};
 
 use crate::decimal::MAX_VALUE;
-use crate::{BookSnapshot, Trade, TradeSide};
+use crate::{BookLevel, BookSnapshot, Trade, TradeSide};
 
 /// Largest order size the engine's gateway accepts, in lots. Defined here
 /// because the adapter does not depend on the engine.
@@ -90,16 +90,55 @@ impl Translator {
     /// canceled whole, levels that shrank lose their newest orders first, and
     /// levels that grew get one post-only order for the difference.
     pub fn on_snapshot(&mut self, snapshot: &BookSnapshot) -> Vec<(Ts, Command)> {
+        self.mirror(snapshot, |_| true, |_| true)
+    }
+
+    /// Commands that make the shadow book show a snapshot that covers only the
+    /// top of the book, leaving deeper levels as they are.
+    ///
+    /// Only the price window the snapshot spans changes: bids at or above its
+    /// lowest bid and asks at or below its highest ask. Inside it the commands
+    /// are those of [`Translator::on_snapshot`]. A side with no levels changes
+    /// nothing, since the snapshot does not say where its window ends.
+    ///
+    /// Levels outside the window cannot cross anything placed inside it: they
+    /// lie beyond the window's far edge, below the lowest bid or above the
+    /// highest ask, and the snapshot's own bids stay below its asks. Only a
+    /// side left unchanged for being empty can still be crossed by the other
+    /// side's new orders, which `rejected_makers` counts.
+    pub fn on_top(&mut self, snapshot: &BookSnapshot) -> Vec<(Ts, Command)> {
+        let lowest_bid = nonzero(&snapshot.bids).map(|level| level.price).min();
+        let highest_ask = nonzero(&snapshot.asks).map(|level| level.price).max();
+        self.mirror(
+            snapshot,
+            |price| lowest_bid.is_some_and(|lowest| price >= lowest),
+            |price| highest_ask.is_some_and(|highest| price <= highest),
+        )
+    }
+
+    /// Shared body of the two snapshot methods: each side changes only at the
+    /// prices its window selects, and a window that selects nothing leaves the
+    /// side alone.
+    fn mirror(
+        &mut self,
+        snapshot: &BookSnapshot,
+        bid_window: impl Fn(Price) -> bool,
+        ask_window: impl Fn(Price) -> bool,
+    ) -> Vec<(Ts, Command)> {
         let ts = snapshot.ts;
         let (mut removals, mut places) = (Vec::new(), Vec::new());
         for (side, levels) in [(Side::Buy, &snapshot.bids), (Side::Sell, &snapshot.asks)] {
             let mut wanted: BTreeMap<Price, Qty> = BTreeMap::new();
-            for level in levels.iter().filter(|level| level.qty > 0) {
+            for level in nonzero(levels) {
                 let qty = wanted.entry(level.price).or_default();
                 *qty = qty.saturating_add(level.qty);
             }
+            let in_window = |price: Price| match side {
+                Side::Buy => bid_window(price),
+                Side::Sell => ask_window(price),
+            };
             let book = self.shadow.book();
-            for (price, level) in book.levels(side) {
+            for (price, level) in book.levels(side).filter(|&(price, _)| in_window(price)) {
                 let have = level.total();
                 match wanted.remove(&price) {
                     None => {
@@ -162,6 +201,11 @@ impl Translator {
         let events = self.shadow.apply(command);
         Some((command, events))
     }
+}
+
+/// The levels of a snapshot side that hold something.
+fn nonzero(levels: &[BookLevel]) -> impl Iterator<Item = &BookLevel> {
+    levels.iter().filter(|level| level.qty > 0)
 }
 
 /// Commands that remove `excess` lots from a level, newest orders first. An
@@ -496,6 +540,80 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    const DEEP_BIDS: [(Price, Qty); 4] = [(100, 5), (99, 5), (98, 5), (97, 5)];
+    const DEEP_ASKS: [(Price, Qty); 3] = [(101, 4), (102, 5), (103, 5)];
+
+    fn deep_book() -> Translator {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &DEEP_BIDS, &DEEP_ASKS));
+        t
+    }
+
+    #[test]
+    fn a_top_snapshot_leaves_levels_outside_its_window_untouched() {
+        let mut t = deep_book();
+        let out = t.on_top(&snap(2, &[(100, 5), (99, 5)], &[(101, 4)]));
+        assert!(out.is_empty());
+        assert_eq!(
+            levels_of(&t, Side::Buy),
+            [(97, 5), (98, 5), (99, 5), (100, 5)]
+        );
+        assert_eq!(levels_of(&t, Side::Sell), [(101, 4), (102, 5), (103, 5)]);
+    }
+
+    #[test]
+    fn inside_its_window_a_top_snapshot_cancels_shrinks_and_grows() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(100, 3)], &[]));
+        t.on_snapshot(&snap(1, &DEEP_BIDS, &DEEP_ASKS));
+        // Bids: 100 holds orders 1 (3 lots) and 2 (2 lots).
+        let out = t.on_top(&snap(2, &[(100, 4), (98, 5)], &[(101, 6), (102, 5)]));
+        assert_eq!(out.len(), 3);
+        let out = commands(out);
+        assert!(out.contains(&cancel(5))); // 99 is missing inside the window
+        assert!(out.contains(&Command::Replace {
+            order_id: 2,
+            price: 100,
+            qty: 1
+        }));
+        assert!(out.contains(&post(9, Side::Sell, 101, 2)));
+        assert_eq!(
+            levels_of(&t, Side::Buy),
+            [(97, 5), (98, 5), (100, 4)],
+            "97 lies outside the window"
+        );
+        assert_eq!(levels_of(&t, Side::Sell), [(101, 6), (102, 5), (103, 5)]);
+        assert_eq!(t.divergence(), Divergence::default());
+    }
+
+    #[test]
+    fn an_empty_side_in_a_top_snapshot_changes_nothing_there() {
+        let mut t = deep_book();
+        let out = commands(t.on_top(&snap(2, &[], &[(101, 6)])));
+        assert_eq!(out, [post(8, Side::Sell, 101, 2)]);
+        assert_eq!(
+            levels_of(&t, Side::Buy),
+            [(97, 5), (98, 5), (99, 5), (100, 5)]
+        );
+    }
+
+    #[test]
+    fn a_full_snapshot_after_top_snapshots_mirrors_every_level() {
+        let mut t = deep_book();
+        t.on_top(&snap(2, &[(100, 2), (99, 5)], &[(101, 1)]));
+        t.on_top(&snap(3, &[(101, 1)], &[(102, 9)]));
+        let bids = [(100, 7), (99, 1), (98, 5), (96, 2), (95, 3), (94, 1)];
+        let asks = [(101, 4), (102, 5), (104, 5), (105, 1)];
+        t.on_snapshot(&snap(4, &bids, &asks));
+        let sorted = |levels: &[(Price, Qty)]| {
+            let mut levels = levels.to_vec();
+            levels.sort_unstable();
+            levels
+        };
+        assert_eq!(levels_of(&t, Side::Buy), sorted(&bids));
+        assert_eq!(levels_of(&t, Side::Sell), sorted(&asks));
     }
 
     #[test]

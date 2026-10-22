@@ -2,7 +2,8 @@
 //! reported.
 //!
 //! The fixture is 40 seconds of public BTC market data, recorded from
-//! Hyperliquid with the `users` fields removed.
+//! Hyperliquid with the `users` fields removed. It holds both book feeds:
+//! full snapshots of 20 levels per side and top snapshots of 5.
 //!
 //! The test deliberately parses the raw JSON with its own decimal conversion,
 //! so it shares no code with the adapter's parser or the translator it checks.
@@ -23,6 +24,8 @@ const FIXTURE: &str = include_str!("fixtures/hyperliquid-btc-40s.jsonl");
 /// How long the service may stay silent before the test gives up instead of
 /// hanging.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Levels per side that a top snapshot carries; a snapshot with more is full.
+const TOP_DEPTH: usize = 5;
 /// Lots per coin: the market's `qty_decimals` is 5, prices are whole ticks.
 const LOT_DECIMALS: usize = 5;
 
@@ -41,6 +44,7 @@ fn scaled(text: &str, decimals: usize) -> u64 {
 struct Snapshot {
     /// Microseconds, like the commands' times.
     ts: u64,
+    full: bool,
     bids: Levels,
     asks: Levels,
 }
@@ -76,6 +80,11 @@ fn snapshots() -> Vec<Snapshot> {
     let mut all: Vec<Snapshot> = recorded("l2Book")
         .map(|m| Snapshot {
             ts: m["data"]["time"].as_u64().expect("time") * 1_000,
+            full: m["data"]["levels"]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .any(|side| side.as_array().expect("levels").len() > TOP_DEPTH),
             bids: side_levels(&m["data"]["levels"][0]),
             asks: side_levels(&m["data"]["levels"][1]),
         })
@@ -112,47 +121,98 @@ fn every_snapshot_is_rebuilt_exactly() {
     let mut matcher = Matcher::new();
     let mut commands = loaded.commands.into_iter().peekable();
     let snapshots = snapshots();
-    for snapshot in &snapshots {
+    // The replay starts at the first full snapshot.
+    let start = snapshots
+        .iter()
+        .position(|s| s.full)
+        .expect("a full snapshot");
+    let (mut full, mut tops) = (0, 0);
+    for snapshot in &snapshots[start..] {
         while let Some((_, command)) = commands.next_if(|(ts, _)| *ts <= snapshot.ts) {
             matcher.apply(command);
         }
-        assert_eq!(
+        let (bids, asks) = (
             book_levels(&matcher, Side::Buy),
-            snapshot.bids,
-            "bids at {}",
-            snapshot.ts
-        );
-        assert_eq!(
             book_levels(&matcher, Side::Sell),
-            snapshot.asks,
-            "asks at {}",
-            snapshot.ts
         );
+        if snapshot.full {
+            assert_eq!(bids, snapshot.bids, "bids at {}", snapshot.ts);
+            assert_eq!(asks, snapshot.asks, "asks at {}", snapshot.ts);
+            full += 1;
+        } else {
+            assert_eq!(
+                best(&bids, Side::Buy, TOP_DEPTH),
+                best(&snapshot.bids, Side::Buy, TOP_DEPTH)
+            );
+            assert_eq!(
+                best(&asks, Side::Sell, TOP_DEPTH),
+                best(&snapshot.asks, Side::Sell, TOP_DEPTH)
+            );
+            tops += 1;
+        }
     }
-    println!("{} snapshots checked", snapshots.len());
-    assert!(snapshots.len() > 5);
+    println!("{full} full and {tops} top snapshots checked");
+    assert!(full > 5 && tops > 5);
 }
 
-/// The last snapshot with every later trade taken off the side it hit.
+/// The book the feed should end on, from a plain level model applied in time
+/// order (trades before a snapshot of the same time): a full snapshot replaces
+/// both sides, a top snapshot replaces only the price window it spans on each
+/// side (an empty side changes nothing), and a trade takes its size off the
+/// level at its price on the side it hit. Events before the first full
+/// snapshot are ignored, as the replay drops them.
 fn expected_final_book() -> (Levels, Levels) {
-    let last = snapshots().pop().expect("a snapshot");
-    let (mut bids, mut asks) = (last.bids, last.asks);
-    for trade in trades().into_iter().filter(|t| t.ts > last.ts) {
-        // A buy takes liquidity from the asks, a sell from the bids.
-        let side = if trade.side == "B" {
-            &mut asks
-        } else {
-            &mut bids
-        };
-        let left = side
-            .get(&trade.price)
-            .copied()
-            .unwrap_or(0)
-            .saturating_sub(trade.qty);
-        if left == 0 {
-            side.remove(&trade.price);
-        } else {
-            side.insert(trade.price, left);
+    enum Event {
+        Trade(Trade),
+        Snapshot(Snapshot),
+    }
+    let mut events: Vec<(u64, u8, Event)> = trades()
+        .into_iter()
+        .map(|t| (t.ts, 0, Event::Trade(t)))
+        .chain(
+            snapshots()
+                .into_iter()
+                .map(|s| (s.ts, 1, Event::Snapshot(s))),
+        )
+        .collect();
+    events.sort_by_key(|&(ts, order, _)| (ts, order));
+    let (mut bids, mut asks) = (Levels::new(), Levels::new());
+    let mut started = false;
+    for (_, _, event) in events {
+        match event {
+            Event::Snapshot(snapshot) if snapshot.full => {
+                started = true;
+                (bids, asks) = (snapshot.bids, snapshot.asks);
+            }
+            Event::Snapshot(top) if started => {
+                if let Some(&lowest) = top.bids.keys().next() {
+                    bids.retain(|&price, _| price < lowest);
+                    bids.extend(&top.bids);
+                }
+                if let Some(&highest) = top.asks.keys().next_back() {
+                    asks.retain(|&price, _| price > highest);
+                    asks.extend(&top.asks);
+                }
+            }
+            Event::Trade(trade) if started => {
+                // A buy takes liquidity from the asks, a sell from the bids.
+                let side = if trade.side == "B" {
+                    &mut asks
+                } else {
+                    &mut bids
+                };
+                let left = side
+                    .get(&trade.price)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(trade.qty);
+                if left == 0 {
+                    side.remove(&trade.price);
+                } else {
+                    side.insert(trade.price, left);
+                }
+            }
+            _ => {}
         }
     }
     (bids, asks)
@@ -165,6 +225,15 @@ fn patch(side: &mut Levels, changes: &[Level]) {
         } else {
             side.insert(*price, *qty);
         }
+    }
+}
+
+/// The best `depth` levels of one side, best first.
+fn best(levels: &Levels, side: Side, depth: usize) -> Vec<(i64, u64)> {
+    let all = levels.iter().map(|(&price, &qty)| (price, qty));
+    match side {
+        Side::Buy => all.rev().take(depth).collect(),
+        Side::Sell => all.take(depth).collect(),
     }
 }
 

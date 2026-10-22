@@ -123,8 +123,8 @@ pub enum LoadError {
         /// What could not be converted.
         source: ConvertError,
     },
-    /// The recording holds no book snapshot, so there is nothing to serve.
-    #[error("the recording holds no l2Book snapshot")]
+    /// The recording holds no full book snapshot, so there is nothing to serve.
+    #[error("the recording holds no full l2Book snapshot")]
     NoSnapshot,
 }
 
@@ -135,17 +135,25 @@ pub struct Loaded {
     pub commands: Vec<(Ts, Command)>,
     /// How far the translator's book is known to differ from the recorded one.
     pub divergence: Divergence,
-    /// Trades at or before the first snapshot's time, which were left out.
+    /// Trades at or before the first full snapshot's time, which were left out.
     pub dropped_trades: usize,
+    /// Top-of-book snapshots before the first full snapshot, which were left
+    /// out.
+    pub dropped_top_snapshots: usize,
     /// Whether the last line was cut off and left out, as happens while the
     /// recorder is still writing.
     pub incomplete_last_line: bool,
 }
 
+/// The most levels per side that a snapshot of only the top of the book
+/// carries; the fast feed sends 5, the standard feed 20.
+const TOP_DEPTH: usize = 5;
+
 /// A recorded book or trade, ready to be translated.
 enum Recorded {
     Trade(Trade),
-    Snapshot(BookSnapshot),
+    Full(BookSnapshot),
+    Top(BookSnapshot),
 }
 
 impl Recorded {
@@ -154,7 +162,7 @@ impl Recorded {
     fn key(&self) -> (Ts, u8) {
         match self {
             Self::Trade(trade) => (trade.ts, 0),
-            Self::Snapshot(snapshot) => (snapshot.ts, 1),
+            Self::Full(snapshot) | Self::Top(snapshot) => (snapshot.ts, 1),
         }
     }
 }
@@ -162,11 +170,22 @@ impl Recorded {
 /// Translates a JSON Lines recording of `l2Book` and `trades` messages, with
 /// prices and sizes converted for `market`.
 ///
+/// The two book feeds send messages of the same shape, so the depth tells them
+/// apart: a snapshot with at most [`TOP_DEPTH`] levels on each side is the top
+/// of the book and is mirrored only inside the price window it spans; a deeper
+/// one is a full snapshot. A full snapshot of a book that really has at most
+/// that many levels per side is ambiguous and is treated as a top snapshot:
+/// stale levels beyond its window linger until the next full snapshot, and a
+/// side that is empty in it keeps its stale levels, which can make post-only
+/// orders on the other side be rejected (counted in `rejected_makers`).
+///
 /// Subscription acknowledgements and `pong` replies are skipped, as are empty
 /// lines. Recorded order can differ from time order, so the data is sorted by
-/// time (stable) before it is translated. Trades at or before the first
+/// time (stable) before it is translated. Trades at or before the first full
 /// snapshot's time are dropped: the first trades message after subscribing is
-/// a backlog, and a snapshot already reflects every trade up to its time.
+/// a backlog, and a snapshot already reflects every trade up to its time. Top
+/// snapshots before the first full one are dropped too, so the replay always
+/// starts from a full book.
 ///
 /// A recording that does not end with a line break may end in the middle of a
 /// line, because the recorder writes in blocks while it runs; such a last line
@@ -175,7 +194,7 @@ impl Recorded {
 /// # Errors
 ///
 /// Returns a [`LoadError`] for the first line that is malformed, on another
-/// channel, or not convertible, or if the recording has no snapshot.
+/// channel, or not convertible, or if the recording has no full snapshot.
 pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
     let unfinished_line = (!recording.ends_with('\n')).then(|| recording.lines().count());
     let mut incomplete_last_line = false;
@@ -205,9 +224,14 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         let convert = |source| LoadError::Convert { line, source };
         match serde_json::from_value(value).map_err(parse)? {
             Message::L2Book(book) => {
-                recorded.push(Recorded::Snapshot(
-                    book.to_snapshot(market).map_err(convert)?,
-                ));
+                let snapshot = book.to_snapshot(market).map_err(convert)?;
+                recorded.push(
+                    if snapshot.bids.len().max(snapshot.asks.len()) <= TOP_DEPTH {
+                        Recorded::Top(snapshot)
+                    } else {
+                        Recorded::Full(snapshot)
+                    },
+                );
             }
             Message::Trades(trades) => {
                 for trade in &trades {
@@ -217,27 +241,32 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         }
     }
     recorded.sort_by_key(Recorded::key);
-    let first_snapshot = recorded
-        .iter()
-        .find_map(|item| match item {
-            Recorded::Snapshot(snapshot) => Some(snapshot.ts),
-            Recorded::Trade(_) => None,
-        })
-        .ok_or(LoadError::NoSnapshot)?;
     let mut translator = Translator::new();
     let mut commands = Vec::new();
-    let mut dropped_trades = 0;
+    let (mut dropped_trades, mut dropped_top_snapshots) = (0, 0);
+    let mut started = false;
     for item in &recorded {
         match item {
-            Recorded::Trade(trade) if trade.ts <= first_snapshot => dropped_trades += 1,
+            // Trades sort before a snapshot of the same time, so everything
+            // before the first full snapshot is at or before its time.
+            Recorded::Trade(_) if !started => dropped_trades += 1,
+            Recorded::Top(_) if !started => dropped_top_snapshots += 1,
             Recorded::Trade(trade) => commands.extend(translator.on_trade(trade)),
-            Recorded::Snapshot(snapshot) => commands.extend(translator.on_snapshot(snapshot)),
+            Recorded::Top(snapshot) => commands.extend(translator.on_top(snapshot)),
+            Recorded::Full(snapshot) => {
+                started = true;
+                commands.extend(translator.on_snapshot(snapshot));
+            }
         }
+    }
+    if !started {
+        return Err(LoadError::NoSnapshot);
     }
     Ok(Loaded {
         commands,
         divergence: translator.divergence(),
         dropped_trades,
+        dropped_top_snapshots,
         incomplete_last_line,
     })
 }
@@ -346,8 +375,8 @@ mod tests {
     const PONG: &str = r#"{"channel":"pong"}"#;
     // A trade from before the first snapshot, as in the backlog sent on subscribing.
     const BACKLOG: &str = r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"83990.0","sz":"0.1","time":900,"tid":1}]}"#;
-    const FIRST: &str = r#"{"channel":"l2Book","data":{"coin":"BTC","time":1000,"levels":[[{"n":3,"px":"84000.0","sz":"0.5"},{"n":3,"px":"83999.0","sz":"1.0"}],[{"n":3,"px":"84001.0","sz":"0.5"},{"n":3,"px":"84002.0","sz":"1.0"}]]}}"#;
-    const SECOND: &str = r#"{"channel":"l2Book","data":{"coin":"BTC","time":2000,"levels":[[{"n":3,"px":"84000.0","sz":"0.5"},{"n":3,"px":"83999.0","sz":"1.0"}],[{"n":3,"px":"84001.0","sz":"0.3"},{"n":3,"px":"84002.0","sz":"1.0"}]]}}"#;
+    const FIRST: &str = r#"{"channel":"l2Book","data":{"coin":"BTC","time":1000,"levels":[[{"n":3,"px":"84000.0","sz":"0.5"},{"n":3,"px":"83999.0","sz":"1.0"},{"n":1,"px":"83998.0","sz":"1.0"},{"n":1,"px":"83997.0","sz":"1.0"},{"n":1,"px":"83996.0","sz":"1.0"},{"n":1,"px":"83995.0","sz":"1.0"}],[{"n":3,"px":"84001.0","sz":"0.5"},{"n":3,"px":"84002.0","sz":"1.0"}]]}}"#;
+    const SECOND: &str = r#"{"channel":"l2Book","data":{"coin":"BTC","time":2000,"levels":[[{"n":3,"px":"84000.0","sz":"0.5"},{"n":3,"px":"83999.0","sz":"1.0"},{"n":1,"px":"83998.0","sz":"1.0"},{"n":1,"px":"83997.0","sz":"1.0"},{"n":1,"px":"83996.0","sz":"1.0"},{"n":1,"px":"83995.0","sz":"1.0"}],[{"n":3,"px":"84001.0","sz":"0.3"},{"n":3,"px":"84002.0","sz":"1.0"}]]}}"#;
     // At the second snapshot's time, so the snapshot already reflects it.
     const TRADE: &str = r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"84001.0","sz":"0.2","time":2000,"tid":2}]}"#;
 
@@ -364,9 +393,15 @@ mod tests {
     fn skipped_channels_make_no_commands_and_a_trade_precedes_its_snapshot() {
         let loaded = load(&recording(&[]), &engine::market()).unwrap();
         let ts: Vec<Ts> = loaded.commands.iter().map(|(ts, _)| *ts).collect();
-        assert_eq!(ts, [1_000_000, 1_000_000, 1_000_000, 1_000_000, 2_000_000]);
+        assert_eq!(
+            ts,
+            [1_000_000; 8]
+                .into_iter()
+                .chain([2_000_000])
+                .collect::<Vec<_>>()
+        );
         assert!(matches!(
-            loaded.commands[4].1,
+            loaded.commands[8].1,
             Command::Place {
                 order_type: protocol::OrderType::Limit {
                     time_in_force: protocol::TimeInForce::Ioc,
@@ -386,7 +421,51 @@ mod tests {
         let at_snapshot = TRADE.replace("2000", "1000");
         let loaded = load(&[FIRST, &at_snapshot].join("\n"), &engine::market()).unwrap();
         assert_eq!(loaded.dropped_trades, 1);
-        assert_eq!(loaded.commands.len(), 4);
+        assert_eq!(loaded.commands.len(), 8);
+    }
+
+    /// A snapshot with `bids` bid levels and one ask, at `time` milliseconds.
+    fn book_line(time: u64, bids: u64) -> String {
+        let levels: Vec<String> = (0..bids)
+            .map(|i| format!(r#"{{"n":1,"px":"{}.0","sz":"1.0"}}"#, 84_000 - i))
+            .collect();
+        let ask = r#"{"n":1,"px":"84001.0","sz":"1.0"}"#;
+        format!(
+            r#"{{"channel":"l2Book","data":{{"coin":"BTC","time":{time},"levels":[[{}],[{ask}]]}}}}"#,
+            levels.join(",")
+        )
+    }
+
+    #[test]
+    fn snapshots_are_classified_by_depth() {
+        let market = engine::market();
+        // One full snapshot, then a top one: it moves the ask only inside its window.
+        let full = book_line(1_000, TOP_DEPTH as u64 + 1);
+        let top = book_line(2_000, TOP_DEPTH as u64).replace("84001.0", "84002.0");
+        let loaded = load(&[full.clone(), top].join("\n"), &market).unwrap();
+        // 6 bids and 1 ask, then the ask replaced and the 5 bids unchanged.
+        assert_eq!(loaded.commands.len(), 7 + 2);
+        assert_eq!(loaded.dropped_top_snapshots, 0);
+        // A snapshot of exactly TOP_DEPTH levels is top-only and cannot start a replay.
+        let only_top = book_line(1_000, TOP_DEPTH as u64);
+        assert!(matches!(
+            load(&only_top, &market),
+            Err(LoadError::NoSnapshot)
+        ));
+        // One level more is a full snapshot.
+        assert!(load(&full, &market).is_ok());
+    }
+
+    #[test]
+    fn top_snapshots_before_the_first_full_one_are_dropped_and_counted() {
+        let top = |time| book_line(time, TOP_DEPTH as u64);
+        let full = book_line(3_000, TOP_DEPTH as u64 + 1);
+        let text = [top(1_000), top(2_000), full.clone(), top(4_000)].join("\n");
+        let loaded = load(&text, &engine::market()).unwrap();
+        assert_eq!(loaded.dropped_top_snapshots, 2);
+        assert_eq!(loaded.commands.iter().map(|c| c.0).min(), Some(3_000_000));
+        let from_full = load(&[full, top(4_000)].join("\n"), &engine::market()).unwrap();
+        assert_eq!(loaded.commands, from_full.commands);
     }
 
     #[test]
