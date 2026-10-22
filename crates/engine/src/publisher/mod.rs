@@ -40,9 +40,10 @@ impl Handle {
 
 /// Starts the publisher task.
 ///
-/// It runs until `shutdown` fires or the event queue closes. Ending for any
-/// reason cancels `shutdown`, and the update broadcast closes with the task,
-/// which disconnects every client.
+/// It runs until `shutdown` fires or the event queue closes; in the second
+/// case the events received since the last tick are published first. Ending
+/// for any reason cancels `shutdown`, and the update broadcast closes with the
+/// task, which disconnects every client.
 pub fn spawn(
     market: MarketInfo,
     mut events: mpsc::Receiver<Envelope<Event>>,
@@ -64,6 +65,7 @@ pub fn spawn(
                 event = events.recv() => match event {
                     Some(event) => publisher.ingest(event),
                     None => {
+                        publisher.tick();
                         warn!("event source closed, stopping publisher");
                         break;
                     }
@@ -86,6 +88,8 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::app::market;
+    use protocol::FeedMessage;
+    use tokio::sync::broadcast::error::RecvError;
 
     #[tokio::test]
     async fn closed_event_queue_stops_the_publisher_and_cancels_shutdown() {
@@ -101,5 +105,41 @@ mod tests {
             .expect("publisher stops")
             .expect("publisher does not panic");
         assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn events_received_before_the_queue_closed_are_published_first() {
+        let (events, queue) = mpsc::channel(4);
+        let shutdown = CancellationToken::new();
+        let (handle, task) = spawn(market(), queue, shutdown);
+        let mut subscription = handle.subscribe().await.expect("publisher is running");
+        // Lets the immediate first tick pass, so the next one is a tick away.
+        time::sleep(Duration::from_millis(20)).await;
+
+        let body = Event::Canceled {
+            order_id: 1,
+            leaves_qty: 3,
+        };
+        events
+            .send(Envelope {
+                seq: 1,
+                ts: 0,
+                body,
+            })
+            .await
+            .expect("queue is open");
+        drop(events);
+
+        let frame = subscription.updates.recv().await.expect("final update");
+        let FeedMessage::Update { events, .. } = serde_json::from_str(frame.as_str()).unwrap()
+        else {
+            panic!("expected an update");
+        };
+        assert_eq!(events.len(), 1);
+        task.await.expect("publisher does not panic");
+        assert_eq!(
+            subscription.updates.recv().await.unwrap_err(),
+            RecvError::Closed
+        );
     }
 }

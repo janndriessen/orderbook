@@ -81,8 +81,11 @@ async fn serve_client(mut socket: WebSocket, state: AppState) {
     pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heard = Instant::now();
     loop {
+        // Buffered updates come first: when the publisher ends it cancels
+        // `shutdown` at the same moment, and its final update must still be
+        // forwarded before the client is closed.
         tokio::select! {
-            () = state.shutdown.cancelled() => break,
+            biased;
             update = updates.recv() => match on_update(update) {
                 Next::Send(frame) => {
                     if !send(&mut socket, Message::Text(frame)).await {
@@ -91,6 +94,7 @@ async fn serve_client(mut socket: WebSocket, state: AppState) {
                 }
                 Next::Disconnect | Next::Stop => break,
             },
+            () = state.shutdown.cancelled() => break,
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                 // Pings are answered by the library; the feed takes no input,

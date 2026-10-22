@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use engine::{RandomWalk, Step};
 use futures_util::StreamExt;
-use protocol::{Command, FeedMessage};
+use protocol::{Command, FeedMessage, OrderType, Side, TimeInForce};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -204,4 +204,68 @@ async fn shutdown_stops_an_idle_flow() {
         .expect("wait task")
         .expect("the source reaches the second step");
     stop(shutdown, server).await;
+}
+
+/// The last command's level must reach clients that stay connected until the
+/// server closes them. The publisher cancels shutdown at the moment it
+/// ends, so losing the final frame is a race; it repeats to make a regression
+/// very likely to show.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_final_update_reaches_clients_before_the_close() {
+    let place = |order_id, price, wait| Step {
+        command: Command::Place {
+            order_id,
+            side: Side::Buy,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Gtc,
+            },
+            qty: 1,
+        },
+        ts: order_id,
+        wait,
+    };
+    for _ in 0..10 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let flow = vec![
+            place(1, 100, Duration::from_millis(250)),
+            place(2, 90, Duration::ZERO),
+        ];
+        let server = tokio::spawn(engine::run(
+            listener,
+            flow.into_iter(),
+            CancellationToken::new(),
+            engine::PING_INTERVAL,
+        ));
+        let mut client = connect(addr).await;
+        let mut bids = std::collections::BTreeSet::new();
+        while let Ok(Some(Ok(frame))) = timeout(WAIT, client.next()).await {
+            let Message::Text(text) = frame else { continue };
+            match serde_json::from_str(text.as_str()).expect("feed message") {
+                FeedMessage::Snapshot { bids: levels, .. } => {
+                    bids = levels.iter().map(|l| l.price).collect();
+                }
+                FeedMessage::Update { bids: levels, .. } => {
+                    for level in levels {
+                        if level.qty == 0 {
+                            bids.remove(&level.price);
+                        } else {
+                            bids.insert(level.price);
+                        }
+                    }
+                }
+                FeedMessage::Heartbeat { .. } => {}
+            }
+        }
+        assert!(
+            bids.contains(&90),
+            "the last command's level is in the feed"
+        );
+        timeout(WAIT, server)
+            .await
+            .expect("server ends with its flow")
+            .expect("server task")
+            .expect("server result");
+    }
 }
