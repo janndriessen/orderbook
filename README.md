@@ -48,6 +48,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 - [ ] Hyperliquid adapter and replayer
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, exactly and without floats, bounded at the protocol's 2^53 - 1
   - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors; messages for other coins are rejected), converted to ticks, lots and microseconds; not yet translated into protocol commands
+  - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed; not yet wired to a recording
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
 
@@ -85,12 +86,13 @@ crates/engine/     order book service: random-walk order flow, gateway, matcher 
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
 crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends only on protocol (plus serde and compile-time thiserror, and serde_json in its tests)
+crates/replayer/   paces recorded order flow for the service (real time, n times or maximum speed); depends on engine and protocol
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
 ```
 
-Planned, not yet present: `crates/replayer` and `data/` (recorded sessions, gitignored).
+Planned, not yet present: `data/` (recorded sessions, gitignored).
 
 ## Trade-offs vs. production exchanges
 

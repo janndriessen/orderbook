@@ -8,6 +8,7 @@ members = [
   "crates/harness",
   "crates/matching",
   "crates/protocol",
+  "crates/replayer",
   "crates/adapters/*",
 ]
 
@@ -28,6 +29,7 @@ unwrap_used = "warn"
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
+engine = { path = "crates/engine" }
 futures-util = "0.3.34"
 generator = { path = "crates/generator" }
 matching = { path = "crates/matching" }
