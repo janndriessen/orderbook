@@ -69,8 +69,8 @@ pub struct WireTrade {
 }
 
 /// The `side` marker of a trade, exactly as sent: `B` or `A`. The source's
-/// documentation does not say whether it is the taker's side, so it is not
-/// mapped to a protocol side.
+/// documentation does not define it; on recorded data `B` trades print at the
+/// ask, so it was observed to mark the buyer as the taker, and `A` the seller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TradeSide {
     /// Sent as `B`.

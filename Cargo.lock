@@ -754,6 +754,7 @@ dependencies = [
 name = "hyperliquid-adapter"
 version = "0.1.0"
 dependencies = [
+ "matching",
  "protocol",
  "serde",
  "serde_json",

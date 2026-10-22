@@ -47,7 +47,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] Level totals: left unbounded on purpose, since real BTC flow stays far below 2^53 (see the trade-offs)
 - [ ] Hyperliquid adapter and replayer
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, exactly and without floats, bounded at the protocol's 2^53 - 1
-  - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors; messages for other coins are rejected), converted to ticks, lots and microseconds; not yet translated into protocol commands
+  - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors; messages for other coins are rejected), converted to ticks, lots and microseconds
+  - [x] `hyperliquid-adapter`: a `Translator` turns snapshots and trades into protocol commands through a shadow book of what the engine holds, with counters where it diverges from the source; not yet wired to a recording
   - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed; not yet wired to a recording
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
@@ -85,7 +86,7 @@ crates/matching/   order book, limit- and market-order matching, cancel and repl
 crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
-crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends only on protocol (plus serde and compile-time thiserror, and serde_json in its tests)
+crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends on protocol and matching (plus serde and compile-time thiserror, and serde_json in its tests); `translate` turns snapshots and trades into commands
 crates/replayer/   paces recorded order flow for the service (real time, n times or maximum speed); depends on engine and protocol
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
@@ -111,5 +112,6 @@ Planned, not yet present: `data/` (recorded sessions, gitignored).
 - **Cancel rejects:** `unknown_order` also covers "too late to cancel" (the order already filled or was canceled), which production venues report separately. Telling the two apart needs a record of past order ids in the engine, which answers cancels; the gateway keeps such a record but never sees whether an order filled.
 - **Order flow:** a seeded random walk generates the commands: GTC limits around the touch, cancels, replaces and IOC takers that never exceed the touch, which the real matcher turns into events. It therefore never produces a `Canceled` IOC remainder or a reject.
 - **Slow consumers:** a client that falls behind the broadcast buffer or stalls a send for over a second is disconnected and resyncs from a fresh snapshot. There is no per-client replay of missed updates.
+- **Replayed book:** synthetic orders are placed one per growth of a level, so a level's order count differs from the source's `n` and can exceed it. Every level missing from a snapshot is canceled, which mirrors its top 20. Snapshots arrive about 5 s apart, so changes between them show up only as trades. Post-only makers never produce trades; trades come only from the source's trades, as IOC orders, which can fill at a better price than the source's when the shadow book is stale (`off_price_fill_qty`).
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.
 - **Infrastructure:** a small shared-vCPU cloud server. Production uses dedicated hardware, often co-located, with tuned networking.

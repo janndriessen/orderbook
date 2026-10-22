@@ -17,7 +17,7 @@ crates/
   protocol/     shared message format: commands in, events out, market-data feed; source of the TS types
   matching/     order book and matching; depends on nothing but protocol
   engine/       gateway (validate + sequence), publisher
-  adapters/     one crate per external source, translating into the protocol
+  adapters/     one crate per external source, translating into the protocol (the Hyperliquid adapter uses `matching` for a shadow book of what the engine holds)
   replayer/     plays recorded input: real-time, accelerated, step
   generator/    synthetic and fuzz order flow
   harness/      invariants, oracle diffs, benchmarks
