@@ -21,20 +21,25 @@ pub enum Speed {
     Times(NonZeroU32),
     /// No waits: commands are submitted as fast as the service takes them.
     Max,
+    /// No waits either; [`step_on`] holds each recorded moment back until it
+    /// is told to release it.
+    Step,
 }
 
-/// The text is neither `max` nor a positive integer.
+/// The text is none of `max`, `step` or a positive integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("speed must be `max` or a positive integer")]
+#[error("speed must be `max`, `step` or a positive integer")]
 pub struct InvalidSpeed;
 
 impl FromStr for Speed {
     type Err = InvalidSpeed;
 
-    /// `max`, or a positive integer factor, where `1` is real time.
+    /// `max`, `step`, or a positive integer factor, where `1` is real time.
     fn from_str(text: &str) -> Result<Self, InvalidSpeed> {
-        if text == "max" {
-            return Ok(Self::Max);
+        match text {
+            "max" => return Ok(Self::Max),
+            "step" => return Ok(Self::Step),
+            _ => {}
         }
         match text.parse::<NonZeroU32>().map_err(|_| InvalidSpeed)? {
             factor if factor.get() == 1 => Ok(Self::RealTime),
@@ -67,10 +72,50 @@ pub fn pace(
         let wait = match speed {
             Speed::RealTime => gap,
             Speed::Times(n) => gap / n.get(),
-            Speed::Max => Duration::ZERO,
+            Speed::Max | Speed::Step => Duration::ZERO,
         };
         Some(Step { command, ts, wait })
     })
+}
+
+/// What [`step_on`] is told to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Release the next recorded moment.
+    Next,
+    /// End the flow.
+    Stop,
+}
+
+/// Yields the steps of `flow` one recorded moment at a time: all consecutive
+/// steps with the same time form a group (it can mix a snapshot's commands and
+/// trades), and before the first step of a group this blocks until `signals`
+/// delivers [`Signal::Next`]. [`Signal::Stop`] or a dropped sender ends the
+/// flow without releasing the group, for good. Steps inside a released group
+/// have no wait.
+///
+/// Like [`hold`], the wait happens inside `next`, so only `signals` can wake
+/// the consuming thread.
+pub fn step_on(
+    mut flow: impl Iterator<Item = Step>,
+    signals: Receiver<Signal>,
+) -> impl Iterator<Item = Step> {
+    let mut released: Option<Ts> = None;
+    iter::from_fn(move || {
+        let step = flow.next()?;
+        if released != Some(step.ts) {
+            if signals.recv() != Ok(Signal::Next) {
+                return None;
+            }
+            info!(ts = step.ts, "released");
+            released = Some(step.ts);
+        }
+        Some(Step {
+            wait: Duration::ZERO,
+            ..step
+        })
+    })
+    .fuse()
 }
 
 /// Yields the steps of `flow`, then, instead of ending, waits until `release`
@@ -88,7 +133,6 @@ pub fn hold(
         if let Some(step) = flow.next() {
             return Some(step);
         }
-        info!("replay finished, holding the final book");
         let _ = release.recv();
         None
     })
@@ -567,7 +611,8 @@ mod tests {
         assert_eq!("max".parse(), Ok(Speed::Max));
         assert_eq!("1".parse(), Ok(Speed::RealTime));
         assert_eq!("10".parse(), Ok(times(10)));
-        for bad in ["0", "-1", "1.5", "MAX", ""] {
+        assert_eq!("step".parse(), Ok(Speed::Step));
+        for bad in ["0", "-1", "1.5", "MAX", "", "Step", "steps"] {
             assert_eq!(bad.parse::<Speed>(), Err(InvalidSpeed), "{bad:?}");
         }
     }
@@ -603,5 +648,88 @@ mod tests {
     #[test]
     fn hold_ends_when_a_message_is_sent() {
         assert_released_by(|sender| sender.send(()).unwrap());
+    }
+
+    type Report = Option<(Ts, Duration)>;
+
+    /// Runs `step_on` over commands at ts 10, 10, 10, 20, 20 on a thread that
+    /// reports each step as it arrives. After the flow's first `None` it asks
+    /// once more, to show that an ended flow stays ended, and then exits.
+    fn stepping() -> (
+        std::sync::mpsc::Sender<Signal>,
+        std::sync::mpsc::Receiver<Report>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (signals, receive) = std::sync::mpsc::channel();
+        let (seen, reports) = std::sync::mpsc::channel();
+        // A real-time pace, so the zero waits come from `step_on`.
+        let steps = pace(flow(&[10, 10, 10, 20, 20]), Speed::RealTime);
+        let consumer = std::thread::spawn(move || {
+            let mut steps = step_on(steps, receive);
+            let mut next = || steps.next().map(|s| (s.ts, s.wait));
+            loop {
+                let report = next();
+                let ended = report.is_none();
+                if seen.send(report).is_err() {
+                    return;
+                }
+                if ended {
+                    let _ = seen.send(next());
+                    return;
+                }
+            }
+        });
+        (signals, reports, consumer)
+    }
+
+    fn drain(reports: &std::sync::mpsc::Receiver<Report>, count: usize) -> Vec<Report> {
+        (0..count)
+            .map(|_| reports.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect()
+    }
+
+    fn quiet(reports: &std::sync::mpsc::Receiver<Report>) {
+        assert!(reports.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn each_next_releases_one_time_group_with_zero_waits() {
+        let (signals, reports, consumer) = stepping();
+        quiet(&reports);
+        signals.send(Signal::Next).unwrap();
+        let zero = Duration::ZERO;
+        assert_eq!(drain(&reports, 3), vec![Some((10, zero)); 3]);
+        quiet(&reports);
+        signals.send(Signal::Next).unwrap();
+        assert_eq!(drain(&reports, 2), vec![Some((20, zero)); 2]);
+        // The end of the recording needs no further signal.
+        assert_eq!(drain(&reports, 2), [None, None]);
+        drop(signals);
+        consumer.join().unwrap();
+    }
+
+    #[test]
+    fn stop_ends_the_flow_for_good_before_or_between_groups() {
+        for groups_before in [0, 1] {
+            let (signals, reports, consumer) = stepping();
+            for _ in 0..groups_before {
+                signals.send(Signal::Next).unwrap();
+                assert_eq!(drain(&reports, 3).len(), 3);
+            }
+            signals.send(Signal::Stop).unwrap();
+            // The sender is still alive: the flow must end without it.
+            assert_eq!(drain(&reports, 2), [None, None]);
+            drop(signals);
+            consumer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_dropped_sender_ends_the_flow_without_releasing() {
+        let (signals, reports, consumer) = stepping();
+        quiet(&reports);
+        drop(signals);
+        assert_eq!(drain(&reports, 2), [None, None]);
+        consumer.join().unwrap();
     }
 }

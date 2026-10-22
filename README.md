@@ -58,7 +58,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - logs the translator's divergence counters, the dropped trades and top snapshots, and recorded gaps over 60 s
     - after the last command it keeps serving the final book until Ctrl-C
   - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against 40 s of recorded public BTC data: after replaying it, the matcher's book equals every recorded full snapshot exactly and the top 5 levels per side equal every recorded top snapshot, and the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots and trades in time order
-  - [ ] Step mode of the replayer
+  - [x] Step mode of the replayer: `REPLAY_SPEED=step` waits for Enter before each recorded moment
   - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (both the standard and the fast feed) and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book or trades message; acknowledgements, `pong` and `error` messages count as no progress
   - [x] Re-measure level lengths and cancel cost on replayed Hyperliquid data: real levels stay short, so levels remain a `VecDeque` (`levels` binary, results under the price-levels trade-off)
 - [ ] Deployment to a small Hetzner server
@@ -74,6 +74,7 @@ cargo run -p harness --release --bin bench   # matcher throughput and cancel cos
 cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard and fast feed) and trades from Hyperliquid to data/, until Ctrl-C
 REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # serves a recording through the engine
 REPLAY_PATH=data/<recording>.jsonl cargo run --release -p replayer --bin levels   # level lengths and cancel cost on a recording; release build only
+REPLAY_SPEED=step REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # Enter plays one recorded moment
 ```
 
 The generated TypeScript files are committed; do not edit them by hand.
@@ -91,7 +92,7 @@ pnpm -C web dev                          # http://localhost:5173, /ws is proxied
 | `ORDERBOOK_SEED` | clock-derived    | Seed of the random-walk order flow; the same seed gives the same command and event streams |
 | `RUST_LOG`       | `info`           | Log filter                                                   |
 | `REPLAY_PATH`    | required         | Recording that `replay` serves, as written by `record` |
-| `REPLAY_SPEED`   | `1`              | Playback speed of `replay`: `max`, or a positive integer factor (`1` is real time) |
+| `REPLAY_SPEED`   | `1`              | Playback speed of `replay`: `max`, `step` (Enter in the terminal plays one recorded moment: all commands that share a time), or a positive integer factor (`1` is real time) |
 | `RECORD_PATH`    | `data/hyperliquid-btc-<unix seconds>.jsonl` | Output file of `record`; its directory is created if missing, and an existing file is never overwritten |
 | `RECORD_SECONDS` | run until Ctrl-C | Makes `record` stop after this many seconds; must be above zero |
 

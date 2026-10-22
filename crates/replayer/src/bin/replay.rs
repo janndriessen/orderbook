@@ -2,22 +2,28 @@
 //! order book service, so the feed shows the recorded book.
 //!
 //! Settings come from the environment: `REPLAY_PATH` (required, a recording
-//! made by `record`), `REPLAY_SPEED` (`max`, or a positive integer factor;
-//! default `1`, real time), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`) and
+//! made by `record`), `REPLAY_SPEED` (`max`, `step`, or a positive integer
+//! factor; default `1`, real time; in `step` mode each Enter on stdin plays one
+//! recorded moment), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`) and
 //! `RUST_LOG` (log filter, default `info`). When the recording ends the
 //! final book stays served until Ctrl-C. The replay starts at the first full
 //! book snapshot: trades at or before it and top-of-book snapshots before it
 //! are dropped, and a recording without a full snapshot is refused.
 
+use std::io::BufRead;
+use std::iter;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Context;
-use replayer::{Speed, hold, load, long_waits, pace};
+use engine::Step;
+use replayer::{Signal, Speed, hold, load, long_waits, pace, step_on};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// Recorded gaps longer than this are logged, since the replay will sit idle.
+/// Recorded gaps longer than this are logged when the speed waits them out,
+/// since the replay will sit idle.
 const LONG_WAIT: Duration = Duration::from_secs(60);
 
 #[tokio::main]
@@ -47,32 +53,56 @@ async fn main() -> anyhow::Result<()> {
     if loaded.incomplete_last_line {
         warn!("the last line is incomplete and was left out; is the recorder still running?");
     }
-    for (index, gap) in long_waits(&loaded.commands, LONG_WAIT) {
-        warn!(index, ?gap, "long gap after this command in the recording");
+    if !matches!(speed, Speed::Max | Speed::Step) {
+        for (index, gap) in long_waits(&loaded.commands, LONG_WAIT) {
+            warn!(index, ?gap, "long gap after this command in the recording");
+        }
     }
 
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("cannot listen on {addr}"))?;
     let shutdown = engine::cancel_on_ctrl_c();
-    // The source thread is parked in the flow's `next` after the last command,
-    // where only the release wakes it, so any end of the service must send it.
-    let (release, held) = std::sync::mpsc::channel::<()>();
+    // The source thread is parked in the flow's `next` after the last command
+    // and, in step mode, between moments, where only these channels wake it,
+    // so any end of the service must stop the steps and drop the release.
+    let (release, held) = mpsc::channel::<()>();
+    let (signals, signalled) = mpsc::channel();
+    if speed == Speed::Step {
+        let signals = signals.clone();
+        std::thread::spawn(move || {
+            for _ in std::io::stdin().lock().lines().map_while(Result::ok) {
+                if signals.send(Signal::Next).is_err() {
+                    return;
+                }
+            }
+            warn!("stdin closed; stepping stopped, Ctrl-C to quit");
+        });
+        info!("step mode: press Enter to play the next recorded moment");
+    }
     tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
             shutdown.cancelled().await;
+            let _ = signals.send(Signal::Stop);
             drop(release);
         }
     });
 
-    engine::run(
-        listener,
-        hold(pace(loaded.commands, speed), held),
-        shutdown,
-        engine::PING_INTERVAL,
-    )
-    .await?;
+    // Logged when the flow itself runs out, so a stop in the middle of a
+    // recording does not claim the recording finished.
+    let finished = iter::once_with(|| {
+        info!("replay finished, holding the final book");
+        None::<Step>
+    })
+    .flatten();
+    let paced = pace(loaded.commands, speed).chain(finished);
+    let flow: Box<dyn Iterator<Item = Step> + Send> = if speed == Speed::Step {
+        Box::new(step_on(paced, signalled))
+    } else {
+        Box::new(paced)
+    };
+    engine::run(listener, hold(flow, held), shutdown, engine::PING_INTERVAL).await?;
     info!("service stopped");
     Ok(())
 }
