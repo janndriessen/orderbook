@@ -1,0 +1,487 @@
+//! WebSocket messages (`l2Book` and `trades` channels) and their conversion
+//! into integer form.
+//!
+//! The wire types mirror the JSON and keep numbers as the strings the source
+//! sends. The `users` field of a trade carries wallet addresses and is
+//! deliberately not declared, so it is skipped while parsing and never stored.
+
+use protocol::{MarketInfo, Price, Qty, Ts};
+use std::fmt;
+
+use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+
+use crate::decimal::MAX_VALUE;
+use crate::{DecimalError, parse_price, parse_qty};
+
+/// One message from the WebSocket, tagged by its `channel`.
+///
+/// `channel` must come before `data`, as the source sends them: the payload is
+/// deserialized straight into the type its channel names, so undeclared parts
+/// of it (a trade's `users`) are skipped without ever being stored. Unknown
+/// channels would need a `#[serde(other)]` unit variant, which refuses a
+/// message that carries a `data` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Message {
+    /// Full snapshot of the top levels of the book.
+    L2Book(WireBook),
+    /// Trades since the last message.
+    Trades(Vec<WireTrade>),
+    /// Any other channel, such as subscription acknowledgements; its payload
+    /// is skipped.
+    Ignored,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(MessageVisitor)
+    }
+}
+
+struct MessageVisitor;
+
+impl<'de> Visitor<'de> for MessageVisitor {
+    type Value = Message;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a message object with `channel` and `data`")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Message, A::Error> {
+        let mut channel: Option<String> = None;
+        let mut message = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "channel" if channel.is_some() => return Err(A::Error::duplicate_field("channel")),
+                "channel" => channel = Some(map.next_value()?),
+                "data" if message.is_some() => return Err(A::Error::duplicate_field("data")),
+                "data" => {
+                    let channel = channel
+                        .as_deref()
+                        .ok_or_else(|| A::Error::custom("`data` before `channel`"))?;
+                    message = Some(match channel {
+                        "l2Book" => Message::L2Book(map.next_value()?),
+                        "trades" => Message::Trades(map.next_value()?),
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                            Message::Ignored
+                        }
+                    });
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        match (channel.as_deref(), message) {
+            (None, _) => Err(A::Error::missing_field("channel")),
+            (_, Some(message)) => Ok(message),
+            (Some("l2Book" | "trades"), None) => Err(A::Error::missing_field("data")),
+            (Some(_), None) => Ok(Message::Ignored),
+        }
+    }
+}
+
+/// `l2Book` payload as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireBook {
+    /// Market name, e.g. `BTC`.
+    pub coin: String,
+    /// Snapshot time in milliseconds.
+    pub time: u64,
+    /// Bids (best first) and asks (best first), in that order.
+    pub levels: [Vec<WireLevel>; 2],
+}
+
+/// One price level as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireLevel {
+    /// Price as a decimal string.
+    pub px: String,
+    /// Total size as a decimal string.
+    pub sz: String,
+    /// Number of orders at the level.
+    pub n: u64,
+}
+
+/// One trade as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireTrade {
+    /// Market name, e.g. `BTC`.
+    pub coin: String,
+    /// Side marker.
+    pub side: TradeSide,
+    /// Price as a decimal string.
+    pub px: String,
+    /// Size as a decimal string.
+    pub sz: String,
+    /// Trade time in milliseconds.
+    pub time: u64,
+    /// Trade id.
+    pub tid: u64,
+}
+
+/// The `side` marker of a trade, exactly as sent: `B` or `A`. The source's
+/// documentation does not say whether it is the taker's side, so it is not
+/// mapped to a protocol side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum TradeSide {
+    /// Sent as `B`.
+    B,
+    /// Sent as `A`.
+    A,
+}
+
+/// Why a wire value could not be converted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConvertError {
+    /// The `px` of a level or trade is not a valid price.
+    #[error("invalid px: {0}")]
+    Px(#[source] DecimalError),
+    /// The `sz` of a level or trade is not a valid size.
+    #[error("invalid sz: {0}")]
+    Sz(#[source] DecimalError),
+    /// The `time` in milliseconds does not fit in microseconds below 2^53, the
+    /// protocol's bound for timestamps.
+    #[error("time {0} ms is too large for microseconds")]
+    TimeOverflow(u64),
+}
+
+/// A level in ticks and lots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookLevel {
+    /// Price in ticks.
+    pub price: Price,
+    /// Total size in lots.
+    pub qty: Qty,
+    /// Number of orders at the level.
+    pub orders: u64,
+}
+
+/// A book snapshot in integer form. Level order and shape, and the `coin` of
+/// the message, are taken from the wire unchecked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookSnapshot {
+    /// Snapshot time in microseconds.
+    pub ts: Ts,
+    /// Bid levels as sent.
+    pub bids: Vec<BookLevel>,
+    /// Ask levels as sent.
+    pub asks: Vec<BookLevel>,
+}
+
+/// A trade in integer form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trade {
+    /// Trade time in microseconds.
+    pub ts: Ts,
+    /// Price in ticks.
+    pub price: Price,
+    /// Size in lots.
+    pub qty: Qty,
+    /// Side marker as sent.
+    pub side: TradeSide,
+    /// Trade id.
+    pub tid: u64,
+}
+
+fn micros(millis: u64) -> Result<Ts, ConvertError> {
+    millis
+        .checked_mul(1000)
+        .filter(|micros| *micros <= MAX_VALUE)
+        .ok_or(ConvertError::TimeOverflow(millis))
+}
+
+fn level(wire: &WireLevel, market: &MarketInfo) -> Result<BookLevel, ConvertError> {
+    Ok(BookLevel {
+        price: parse_price(&wire.px, market).map_err(ConvertError::Px)?,
+        qty: parse_qty(&wire.sz, market).map_err(ConvertError::Sz)?,
+        orders: wire.n,
+    })
+}
+
+impl WireBook {
+    /// Converts to ticks and lots, failing on the first bad value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvertError`] naming the field that failed.
+    pub fn to_snapshot(&self, market: &MarketInfo) -> Result<BookSnapshot, ConvertError> {
+        let side = |levels: &[WireLevel]| -> Result<Vec<BookLevel>, ConvertError> {
+            levels.iter().map(|l| level(l, market)).collect()
+        };
+        Ok(BookSnapshot {
+            ts: micros(self.time)?,
+            bids: side(&self.levels[0])?,
+            asks: side(&self.levels[1])?,
+        })
+    }
+}
+
+impl WireTrade {
+    /// Converts to ticks and lots.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvertError`] naming the field that failed.
+    pub fn to_trade(&self, market: &MarketInfo) -> Result<Trade, ConvertError> {
+        Ok(Trade {
+            ts: micros(self.time)?,
+            price: parse_price(&self.px, market).map_err(ConvertError::Px)?,
+            qty: parse_qty(&self.sz, market).map_err(ConvertError::Sz)?,
+            side: self.side,
+            tid: self.tid,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn market() -> MarketInfo {
+        MarketInfo {
+            symbol: "BTC-USD".to_string(),
+            price_decimals: 0,
+            qty_decimals: 5,
+        }
+    }
+
+    const BOOK: &str = r#"{"channel":"l2Book","data":{"coin":"BTC","time":1792599271750,"levels":[
+        [{"px":"84579.0","sz":"3.07937","n":22},{"px":"84578.0","sz":"0.12415","n":1},{"px":"84577.0","sz":"0.003","n":2}],
+        [{"px":"84580.0","sz":"12.83161","n":51},{"px":"84581.0","sz":"0.33641","n":2},{"px":"84582.0","sz":"0.71902","n":1}]]}}"#;
+
+    const TRADES: &str = r#"{"channel":"trades","data":[
+        {"coin":"BTC","side":"B","px":"84580.0","sz":"0.01500","hash":"0x0000000000000000000000000000000000000000000000000000000000000001","time":1792599272000,"tid":1001,"users":["0x0000000000000000000000000000000000000001","0x0000000000000000000000000000000000000002"]},
+        {"coin":"BTC","side":"A","px":"84579.0","sz":"0.2","hash":"0x0000000000000000000000000000000000000000000000000000000000000002","time":1792599272001,"tid":1002,"users":["0x0000000000000000000000000000000000000003","0x0000000000000000000000000000000000000004"]}]}"#;
+
+    fn parse(text: &str) -> Message {
+        serde_json::from_str(text).expect("fixture parses")
+    }
+
+    fn book_with(time: u64, px: &str, sz: &str) -> WireBook {
+        WireBook {
+            coin: "BTC".to_string(),
+            time,
+            levels: [
+                vec![WireLevel {
+                    px: px.to_string(),
+                    sz: sz.to_string(),
+                    n: 1,
+                }],
+                vec![],
+            ],
+        }
+    }
+
+    fn lvl(price: Price, qty: Qty, orders: u64) -> BookLevel {
+        BookLevel { price, qty, orders }
+    }
+
+    #[test]
+    fn converts_a_book_snapshot() {
+        let Message::L2Book(book) = parse(BOOK) else {
+            panic!("expected l2Book");
+        };
+        assert_eq!(
+            book.to_snapshot(&market()),
+            Ok(BookSnapshot {
+                ts: 1_792_599_271_750_000,
+                bids: vec![
+                    lvl(84579, 307_937, 22),
+                    lvl(84578, 12_415, 1),
+                    lvl(84577, 300, 2)
+                ],
+                asks: vec![
+                    lvl(84580, 1_283_161, 51),
+                    lvl(84581, 33_641, 2),
+                    lvl(84582, 71_902, 1)
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn converts_trades() {
+        let Message::Trades(trades) = parse(TRADES) else {
+            panic!("expected trades");
+        };
+        let converted: Result<Vec<_>, _> = trades.iter().map(|t| t.to_trade(&market())).collect();
+        assert_eq!(
+            converted,
+            Ok(vec![
+                Trade {
+                    ts: 1_792_599_272_000_000,
+                    price: 84580,
+                    qty: 1_500,
+                    side: TradeSide::B,
+                    tid: 1001
+                },
+                Trade {
+                    ts: 1_792_599_272_001_000,
+                    price: 84579,
+                    qty: 20_000,
+                    side: TradeSide::A,
+                    tid: 1002
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn other_channels_are_ignored_whatever_their_payload() {
+        for text in [
+            r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}}"#,
+            r#"{"channel":"pong"}"#,
+            r#"{"channel":"other","data":[1,"x",null]}"#,
+            r#"{"channel":"other","data":"text"}"#,
+        ] {
+            assert_eq!(parse(text), Message::Ignored, "{text}");
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let text = r#"{"channel":"trades","extra":1,"data":[{"coin":"BTC","side":"A","px":"1","sz":"1","time":1,"tid":7,"new":true}]}"#;
+        assert!(matches!(parse(text), Message::Trades(t) if t.len() == 1));
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        assert!(serde_json::from_str::<Message>(r#"{"channel":"l2Book","data":{"#).is_err());
+        assert!(serde_json::from_str::<Message>("not json").is_err());
+    }
+
+    #[test]
+    fn rejects_known_channels_with_the_wrong_shape() {
+        for text in [
+            r#"{"channel":"trades","data":{"coin":"BTC"}}"#,
+            r#"{"channel":"trades","data":[{"coin":"BTC","side":"X","px":"1","sz":"1","time":1,"tid":1}]}"#,
+            r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[]]}}"#,
+        ] {
+            assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_bad_price_in_one_level_fails_the_snapshot() {
+        let mut book = book_with(1, "84579.0", "1");
+        book.levels[1].push(WireLevel {
+            px: "84580.5".to_string(),
+            sz: "1".to_string(),
+            n: 1,
+        });
+        assert_eq!(
+            book.to_snapshot(&market()),
+            Err(ConvertError::Px(DecimalError::TooManyDecimals(0)))
+        );
+    }
+
+    #[test]
+    fn a_bad_size_in_a_level_names_the_field() {
+        let book = book_with(1, "84579.0", "1e3");
+        assert_eq!(
+            book.to_snapshot(&market()),
+            Err(ConvertError::Sz(DecimalError::Exponent))
+        );
+    }
+
+    #[test]
+    fn a_bad_size_in_a_trade_names_the_field() {
+        let trade = WireTrade {
+            coin: "BTC".to_string(),
+            side: TradeSide::B,
+            px: "84580.0".to_string(),
+            sz: "-1".to_string(),
+            time: 1,
+            tid: 1,
+        };
+        assert_eq!(
+            trade.to_trade(&market()),
+            Err(ConvertError::Sz(DecimalError::Sign))
+        );
+    }
+
+    fn trade(px: &str, sz: &str, time: u64) -> WireTrade {
+        WireTrade {
+            coin: "BTC".to_string(),
+            side: TradeSide::B,
+            px: px.to_string(),
+            sz: sz.to_string(),
+            time,
+            tid: 1,
+        }
+    }
+
+    #[test]
+    fn a_bad_price_in_a_trade_names_the_field() {
+        assert_eq!(
+            trade("0.5", "1", 1).to_trade(&market()),
+            Err(ConvertError::Px(DecimalError::TooManyDecimals(0)))
+        );
+    }
+
+    #[test]
+    fn time_is_accepted_up_to_the_protocol_bound() {
+        // 9_007_199_254_740 ms is the largest whole millisecond below 2^53 µs.
+        assert_eq!(
+            book_with(9_007_199_254_740, "1", "1")
+                .to_snapshot(&market())
+                .map(|s| s.ts),
+            Ok(9_007_199_254_740_000)
+        );
+        assert_eq!(
+            trade("1", "1", 9_007_199_254_740)
+                .to_trade(&market())
+                .map(|t| t.ts),
+            Ok(9_007_199_254_740_000)
+        );
+    }
+
+    #[test]
+    fn time_beyond_the_protocol_bound_is_rejected() {
+        for time in [
+            9_007_199_254_741,
+            u64::MAX / 1000,
+            u64::MAX / 1000 + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                book_with(time, "1", "1").to_snapshot(&market()),
+                Err(ConvertError::TimeOverflow(time))
+            );
+            assert_eq!(
+                trade("1", "1", time).to_trade(&market()),
+                Err(ConvertError::TimeOverflow(time))
+            );
+        }
+    }
+
+    #[test]
+    fn known_channels_need_their_data() {
+        for text in [
+            r#"{"channel":"l2Book"}"#,
+            r#"{"channel":"trades"}"#,
+            r#"{"channel":"trades","data":null}"#,
+            r#"{"data":[]}"#,
+            r#"{"channel":"trades","data":[],"data":[]}"#,
+            r#"{"data":[],"channel":"trades"}"#,
+        ] {
+            assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn duplicate_fields_and_non_objects_are_rejected() {
+        for text in [
+            r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","px":"2","sz":"1","time":1,"tid":1}]}"#,
+            r#"["trades",[]]"#,
+            r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[],[],[]]}}"#,
+            r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":1,"sz":"1","time":1,"tid":1}]}"#,
+            r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","sz":"1","time":-1,"tid":1}]}"#,
+            r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","sz":"1","time":1}]}"#,
+        ] {
+            assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
+        }
+    }
+}

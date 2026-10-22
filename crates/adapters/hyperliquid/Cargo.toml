@@ -8,7 +8,11 @@ description = "Translates Hyperliquid market data into integer ticks and lots."
 
 [dependencies]
 protocol.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

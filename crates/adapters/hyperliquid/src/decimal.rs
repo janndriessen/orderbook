@@ -4,7 +4,7 @@ use protocol::{MarketInfo, Price, Qty};
 
 /// Largest accepted value in ticks or lots: the protocol's documented limit,
 /// below which values stay exact when read as JavaScript numbers.
-const MAX_VALUE: u64 = (1 << 53) - 1;
+pub(crate) const MAX_VALUE: u64 = (1 << 53) - 1;
 
 /// Why a decimal string was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
