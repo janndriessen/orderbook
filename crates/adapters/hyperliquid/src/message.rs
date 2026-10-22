@@ -3,83 +3,28 @@
 //!
 //! The wire types mirror the JSON and keep numbers as the strings the source
 //! sends. The `users` field of a trade carries wallet addresses and is
-//! deliberately not declared, so it is skipped while parsing and never stored.
+//! deliberately not declared, so it never appears in a parsed message. When
+//! `data` comes before `channel`, the payload is held only while parsing.
 
 use protocol::{MarketInfo, Price, Qty, Ts};
-use std::fmt;
 
-use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::decimal::MAX_VALUE;
 use crate::{DecimalError, parse_price, parse_qty};
 
 /// One message from the WebSocket, tagged by its `channel`.
 ///
-/// `channel` must come before `data`, as the source sends them: the payload is
-/// deserialized straight into the type its channel names, so undeclared parts
-/// of it (a trade's `users`) are skipped without ever being stored. Unknown
-/// channels would need a `#[serde(other)]` unit variant, which refuses a
-/// message that carries a `data` payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A message on any other channel (subscription acknowledgements, `pong`,
+/// `error`) fails to parse; a caller that needs to tell those apart from
+/// malformed data reads `channel` first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "channel", content = "data", rename_all = "camelCase")]
 pub enum Message {
     /// Full snapshot of the top levels of the book.
     L2Book(WireBook),
     /// Trades since the last message.
     Trades(Vec<WireTrade>),
-    /// Any other channel, such as subscription acknowledgements; its payload
-    /// is skipped.
-    Ignored,
-}
-
-impl<'de> Deserialize<'de> for Message {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(MessageVisitor)
-    }
-}
-
-struct MessageVisitor;
-
-impl<'de> Visitor<'de> for MessageVisitor {
-    type Value = Message;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a message object with `channel` and `data`")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Message, A::Error> {
-        let mut channel: Option<String> = None;
-        let mut message = None;
-        while let Some(key) = map.next_key::<String>()? {
-            match key.as_str() {
-                "channel" if channel.is_some() => return Err(A::Error::duplicate_field("channel")),
-                "channel" => channel = Some(map.next_value()?),
-                "data" if message.is_some() => return Err(A::Error::duplicate_field("data")),
-                "data" => {
-                    let channel = channel
-                        .as_deref()
-                        .ok_or_else(|| A::Error::custom("`data` before `channel`"))?;
-                    message = Some(match channel {
-                        "l2Book" => Message::L2Book(map.next_value()?),
-                        "trades" => Message::Trades(map.next_value()?),
-                        _ => {
-                            map.next_value::<IgnoredAny>()?;
-                            Message::Ignored
-                        }
-                    });
-                }
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-        }
-        match (channel.as_deref(), message) {
-            (None, _) => Err(A::Error::missing_field("channel")),
-            (_, Some(message)) => Ok(message),
-            (Some("l2Book" | "trades"), None) => Err(A::Error::missing_field("data")),
-            (Some(_), None) => Ok(Message::Ignored),
-        }
-    }
 }
 
 /// `l2Book` payload as sent.
@@ -329,15 +274,20 @@ mod tests {
     }
 
     #[test]
-    fn other_channels_are_ignored_whatever_their_payload() {
+    fn unknown_channels_are_errors() {
         for text in [
-            r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}}"#,
+            r#"{"channel":"subscriptionResponse","data":{"method":"subscribe"}}"#,
+            r#"{"channel":"error","data":"Invalid subscription"}"#,
             r#"{"channel":"pong"}"#,
-            r#"{"channel":"other","data":[1,"x",null]}"#,
-            r#"{"channel":"other","data":"text"}"#,
         ] {
-            assert_eq!(parse(text), Message::Ignored, "{text}");
+            assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn data_may_come_before_channel() {
+        let text = r#"{"data":[{"coin":"BTC","side":"A","px":"1","sz":"1","time":1,"tid":7}],"channel":"trades"}"#;
+        assert!(matches!(parse(text), Message::Trades(t) if t.len() == 1));
     }
 
     #[test]
@@ -464,18 +414,33 @@ mod tests {
             r#"{"channel":"trades"}"#,
             r#"{"channel":"trades","data":null}"#,
             r#"{"data":[]}"#,
-            r#"{"channel":"trades","data":[],"data":[]}"#,
-            r#"{"data":[],"channel":"trades"}"#,
         ] {
             assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
         }
     }
 
     #[test]
-    fn duplicate_fields_and_non_objects_are_rejected() {
+    fn duplicate_envelope_keys_are_rejected() {
+        for text in [
+            r#"{"channel":"trades","channel":"trades","data":[]}"#,
+            r#"{"channel":"trades","data":[],"data":[]}"#,
+            r#"{"data":[],"channel":"trades","data":[]}"#,
+        ] {
+            assert!(serde_json::from_str::<Message>(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_array_form_is_accepted() {
+        assert_eq!(parse(r#"["trades",[]]"#), Message::Trades(vec![]));
+    }
+
+    #[test]
+    fn duplicate_fields_and_scalars_are_rejected() {
         for text in [
             r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","px":"2","sz":"1","time":1,"tid":1}]}"#,
-            r#"["trades",[]]"#,
+            r#""trades""#,
+            r#"42"#,
             r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[],[],[]]}}"#,
             r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":1,"sz":"1","time":1,"tid":1}]}"#,
             r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","sz":"1","time":-1,"tid":1}]}"#,

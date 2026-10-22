@@ -47,7 +47,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] Level totals: left unbounded on purpose, since real BTC flow stays far below 2^53 (see the trade-offs)
 - [ ] Hyperliquid adapter and replayer
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, with checked arithmetic and the protocol's 2^53 - 1 bound
-  - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are ignored), converted to ticks, lots and microseconds; not yet translated into protocol commands
+  - [x] `hyperliquid-adapter`: serde types for the `l2Book` and `trades` WebSocket messages (other channels are reported as errors), converted to ticks, lots and microseconds; not yet translated into protocol commands
   - [ ] Re-measure level lengths and cancel cost on replayed Hyperliquid data; switch levels to an index-based linked list if real levels get long
 - [ ] Deployment to a small Hetzner server
 
