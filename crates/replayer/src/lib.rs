@@ -282,6 +282,10 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
                     },
                 );
             }
+            Message::Bbo(_) => {
+                let channel = "bbo".to_owned();
+                return Err(LoadError::Channel { line, channel });
+            }
             Message::Trades(trades) => {
                 for trade in &trades {
                     recorded.push(Recorded::Trade(trade.to_trade(market).map_err(convert)?));

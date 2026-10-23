@@ -11,7 +11,7 @@ mod translate;
 
 pub use decimal::DecimalError;
 pub use message::{
-    BookLevel, BookSnapshot, ConvertError, Message, Trade, TradeSide, WireBook, WireLevel,
+    BookLevel, BookSnapshot, ConvertError, Message, Trade, TradeSide, WireBbo, WireBook, WireLevel,
     WireTrade,
 };
 pub use translate::{Divergence, Translator};

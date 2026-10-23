@@ -1,4 +1,4 @@
-//! WebSocket messages (`l2Book` and `trades` channels) and their conversion
+//! WebSocket messages (`l2Book`, `bbo` and `trades` channels) and their conversion
 //! into integer form.
 //!
 //! The wire types mirror the JSON and keep numbers as the strings the source
@@ -25,8 +25,21 @@ const COIN: &str = "BTC";
 pub enum Message {
     /// Full snapshot of the top levels of the book.
     L2Book(WireBook),
+    /// Best bid and offer, sent whenever either changes.
+    Bbo(WireBbo),
     /// Trades since the last message.
     Trades(Vec<WireTrade>),
+}
+
+/// `bbo` payload as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireBbo {
+    /// Market name, e.g. `BTC`.
+    pub coin: String,
+    /// Time in milliseconds.
+    pub time: u64,
+    /// Best bid and best ask, in that order; `null` for an empty side.
+    pub bbo: [Option<WireLevel>; 2],
 }
 
 /// `l2Book` payload as sent.
@@ -95,6 +108,10 @@ pub enum ConvertError {
     /// protocol's bound for timestamps.
     #[error("time {0} ms is too large for microseconds")]
     TimeOverflow(u64),
+    /// The best bid is at or above the best ask, which a resting book never
+    /// shows; the message is a transient or corrupt view and is not usable.
+    #[error("locked or crossed best bid and offer")]
+    LockedOrCrossed,
 }
 
 /// A level in ticks and lots.
@@ -158,6 +175,25 @@ fn level(wire: &WireLevel, market: &MarketInfo) -> Result<BookLevel, ConvertErro
     })
 }
 
+/// Converts one snapshot's sides, failing on the first bad value.
+fn snapshot(
+    coin: &str,
+    time: u64,
+    bids: &[WireLevel],
+    asks: &[WireLevel],
+    market: &MarketInfo,
+) -> Result<BookSnapshot, ConvertError> {
+    check_coin(coin)?;
+    let side = |levels: &[WireLevel]| -> Result<Vec<BookLevel>, ConvertError> {
+        levels.iter().map(|l| level(l, market)).collect()
+    };
+    Ok(BookSnapshot {
+        ts: micros(time)?,
+        bids: side(bids)?,
+        asks: side(asks)?,
+    })
+}
+
 impl WireBook {
     /// Converts to ticks and lots, failing on the first bad value.
     ///
@@ -165,15 +201,42 @@ impl WireBook {
     ///
     /// Returns a [`ConvertError`] naming the field that failed.
     pub fn to_snapshot(&self, market: &MarketInfo) -> Result<BookSnapshot, ConvertError> {
-        check_coin(&self.coin)?;
-        let side = |levels: &[WireLevel]| -> Result<Vec<BookLevel>, ConvertError> {
-            levels.iter().map(|l| level(l, market)).collect()
-        };
-        Ok(BookSnapshot {
-            ts: micros(self.time)?,
-            bids: side(&self.levels[0])?,
-            asks: side(&self.levels[1])?,
-        })
+        snapshot(
+            &self.coin,
+            self.time,
+            &self.levels[0],
+            &self.levels[1],
+            market,
+        )
+    }
+}
+
+impl WireBbo {
+    /// Converts to a one-level-per-side snapshot; an absent side is empty.
+    ///
+    /// An empty side says nothing about where its window ends, so replaying
+    /// the snapshot leaves that side alone; stale levels there can cross the
+    /// other side's new level and make a maker be rejected
+    /// (`rejected_makers`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvertError`] naming the field that failed, or
+    /// [`ConvertError::LockedOrCrossed`] when both sides are present and the
+    /// bid is not below the ask.
+    pub fn to_snapshot(&self, market: &MarketInfo) -> Result<BookSnapshot, ConvertError> {
+        let [bid, ask] = &self.bbo;
+        let snapshot = snapshot(
+            &self.coin,
+            self.time,
+            bid.as_slice(),
+            ask.as_slice(),
+            market,
+        )?;
+        match (snapshot.bids.first(), snapshot.asks.first()) {
+            (Some(bid), Some(ask)) if bid.price >= ask.price => Err(ConvertError::LockedOrCrossed),
+            _ => Ok(snapshot),
+        }
     }
 }
 
@@ -234,6 +297,22 @@ mod tests {
         }
     }
 
+    fn wire(px: &str, sz: &str) -> Option<WireLevel> {
+        Some(WireLevel {
+            px: px.to_string(),
+            sz: sz.to_string(),
+            n: 1,
+        })
+    }
+
+    fn bbo_with(bid: Option<WireLevel>, ask: Option<WireLevel>, time: u64) -> WireBbo {
+        WireBbo {
+            coin: "BTC".to_string(),
+            time,
+            bbo: [bid, ask],
+        }
+    }
+
     fn trade(px: &str, sz: &str, time: u64) -> WireTrade {
         WireTrade {
             coin: "BTC".to_string(),
@@ -269,6 +348,78 @@ mod tests {
                     lvl(84582, 71_902, 1)
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn converts_a_best_bid_and_offer() {
+        let text = r#"{"channel":"bbo","data":{"coin":"BTC","time":1792599271750,"bbo":[
+            {"px":"84579.0","sz":"3.07937","n":22},{"px":"84580.0","sz":"12.83161","n":51}]}}"#;
+        let Message::Bbo(bbo) = parse(text) else {
+            panic!("expected bbo");
+        };
+        assert_eq!(
+            bbo.to_snapshot(&market()),
+            Ok(BookSnapshot {
+                ts: 1_792_599_271_750_000,
+                bids: vec![lvl(84579, 307_937, 22)],
+                asks: vec![lvl(84580, 1_283_161, 51)],
+            })
+        );
+    }
+
+    #[test]
+    fn a_null_side_of_a_best_bid_and_offer_is_empty() {
+        let text = r#"{"channel":"bbo","data":{"coin":"BTC","time":5,"bbo":[null,{"px":"7","sz":"1","n":2}]}}"#;
+        let Message::Bbo(bbo) = parse(text) else {
+            panic!("expected bbo");
+        };
+        assert_eq!(
+            bbo.to_snapshot(&market()),
+            Ok(BookSnapshot {
+                ts: 5_000,
+                bids: vec![],
+                asks: vec![lvl(7, 100_000, 2)],
+            })
+        );
+        let empty = bbo_with(None, None, 1).to_snapshot(&market());
+        assert_eq!(empty.map(|s| (s.bids.len(), s.asks.len())), Ok((0, 0)));
+    }
+
+    #[test]
+    fn a_best_bid_and_offer_checks_coin_time_and_numbers() {
+        let mut eth = bbo_with(wire("1", "1"), None, 1);
+        eth.coin = "ETH".to_string();
+        assert_eq!(
+            eth.to_snapshot(&market()),
+            Err(ConvertError::Coin("ETH".into()))
+        );
+        assert_eq!(
+            bbo_with(wire("1", "1"), None, 9_007_199_254_741).to_snapshot(&market()),
+            Err(ConvertError::TimeOverflow(9_007_199_254_741))
+        );
+        assert_eq!(
+            bbo_with(wire("1.5", "1"), None, 1).to_snapshot(&market()),
+            Err(ConvertError::Px(DecimalError::TooManyDecimals(0)))
+        );
+        assert_eq!(
+            bbo_with(None, wire("2", "1e3"), 1).to_snapshot(&market()),
+            Err(ConvertError::Sz(DecimalError::Invalid))
+        );
+    }
+
+    #[test]
+    fn a_locked_or_crossed_best_bid_and_offer_is_its_own_error() {
+        for (bid, ask) in [("5", "5"), ("6", "5")] {
+            assert_eq!(
+                bbo_with(wire(bid, "1"), wire(ask, "1"), 1).to_snapshot(&market()),
+                Err(ConvertError::LockedOrCrossed)
+            );
+        }
+        assert!(
+            bbo_with(wire("5", "1"), wire("6", "1"), 1)
+                .to_snapshot(&market())
+                .is_ok()
         );
     }
 
