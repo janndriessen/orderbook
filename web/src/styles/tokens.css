@@ -13,7 +13,9 @@
   /* Text, strongest to weakest. */
   --color-text: #d3dde1;
   --color-text-muted: #8a9ba3;
-  --color-text-faint: #5d6e76;
+  /* Faint text is small (11-12px), so it still needs WCAG AA contrast, 4.5:1,
+     on the page, surface and raised backgrounds. */
+  --color-text-faint: #809199;
 
   /* Book sides. The depth variants are the same hues, washed out. */
   --color-bid: #38cfae;
