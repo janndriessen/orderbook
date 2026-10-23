@@ -41,12 +41,14 @@ impl Handle {
 /// Starts the publisher task.
 ///
 /// It runs until `shutdown` fires or the event queue closes; in the second
-/// case the events received since the last tick are published first. Ending
-/// for any reason cancels `shutdown`, and the update broadcast closes with the
-/// task, which disconnects every client.
+/// case the events received since the last tick are published first. Each
+/// queue item holds all events of one command and is taken in one step, so an
+/// update never contains part of a command's events. Ending for any reason
+/// cancels `shutdown`, and the update broadcast closes with the task, which
+/// disconnects every client.
 pub fn spawn(
     market: MarketInfo,
-    mut events: mpsc::Receiver<Envelope<Event>>,
+    mut events: mpsc::Receiver<Vec<Envelope<Event>>>,
     shutdown: CancellationToken,
 ) -> (Handle, JoinHandle<()>) {
     let (requests, mut subscriptions) = mpsc::channel::<oneshot::Sender<Subscription>>(64);
@@ -62,8 +64,8 @@ pub fn spawn(
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
-                event = events.recv() => match event {
-                    Some(event) => publisher.ingest(event),
+                batch = events.recv() => match batch {
+                    Some(batch) => publisher.ingest(batch),
                     None => {
                         publisher.tick();
                         warn!("event source closed, stopping publisher");
@@ -121,11 +123,11 @@ mod tests {
             leaves_qty: 3,
         };
         events
-            .send(Envelope {
+            .send(vec![Envelope {
                 seq: 1,
                 ts: 0,
                 body,
-            })
+            }])
             .await
             .expect("queue is open");
         drop(events);

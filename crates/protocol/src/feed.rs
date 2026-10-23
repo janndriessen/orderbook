@@ -15,6 +15,11 @@
 //! whose effect already arrives as level changes. They keep the engine's
 //! `seq`, which therefore skips the omitted updates; gap detection relies on
 //! the feed's own `seq` alone.
+//!
+//! An update never contains part of a command's events: all of them arrive in
+//! one update, together with the level changes they caused. A snapshot's
+//! event history is the most recent events, so it can begin partway through a
+//! command.
 
 use serde::{Deserialize, Serialize};
 

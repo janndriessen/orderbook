@@ -85,9 +85,12 @@ impl Publisher {
         }
     }
 
-    /// Queues an engine event for the next tick.
-    pub fn ingest(&mut self, event: Envelope<Event>) {
-        self.pending.push(event);
+    /// Queues the events of one command for the next tick.
+    ///
+    /// They are taken together, so no tick can publish part of a command's
+    /// events and leave the rest for the next update.
+    pub fn ingest(&mut self, events: Vec<Envelope<Event>>) {
+        self.pending.extend(events);
     }
 
     /// Publishes everything ingested since the last tick as one update.
@@ -174,8 +177,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use protocol::{
-        CancelRejectReason, CancelRequest, Level, OrderType, Price, Qty, RejectReason, Side,
-        TimeInForce,
+        CancelRejectReason, CancelRequest, Command, Level, OrderType, Price, Qty, RejectReason,
+        Side, TimeInForce,
     };
 
     use super::*;
@@ -234,11 +237,11 @@ mod tests {
                 reason: CancelRejectReason::UnknownOrder,
             },
         );
-        publisher.ingest(accepted(1, 7));
-        publisher.ingest(l2(2, Side::Buy, 100, 5));
-        publisher.ingest(l2(3, Side::Sell, 101, 3));
-        publisher.ingest(rejected.clone());
-        publisher.ingest(cancel_rejected.clone());
+        publisher.ingest(vec![accepted(1, 7)]);
+        publisher.ingest(vec![l2(2, Side::Buy, 100, 5)]);
+        publisher.ingest(vec![l2(3, Side::Sell, 101, 3)]);
+        publisher.ingest(vec![rejected.clone()]);
+        publisher.ingest(vec![cancel_rejected.clone()]);
         assert_eq!(publisher.tick(), Some(1));
 
         let FeedMessage::Update {
@@ -257,7 +260,7 @@ mod tests {
             "L2Update must not be forwarded"
         );
 
-        publisher.ingest(l2(6, Side::Buy, 100, 0));
+        publisher.ingest(vec![l2(6, Side::Buy, 100, 0)]);
         assert_eq!(publisher.tick(), Some(2));
         let FeedMessage::Update { bids, asks, .. } = next_update(&mut rx) else {
             panic!("expected an update");
@@ -270,10 +273,10 @@ mod tests {
         let mut publisher = Publisher::new(market());
         let mut rx = publisher.subscribe().updates;
         assert_eq!(publisher.tick(), None);
-        publisher.ingest(l2(1, Side::Buy, 100, 1));
+        publisher.ingest(vec![l2(1, Side::Buy, 100, 1)]);
         assert_eq!(publisher.tick(), Some(1));
         assert_eq!(publisher.tick(), None);
-        publisher.ingest(l2(2, Side::Buy, 100, 2));
+        publisher.ingest(vec![l2(2, Side::Buy, 100, 2)]);
         assert_eq!(publisher.tick(), Some(2));
         assert!(matches!(
             next_update(&mut rx),
@@ -305,7 +308,7 @@ mod tests {
         assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
         assert_eq!(idle(&mut publisher, &mut rx, 1), beat(0));
 
-        publisher.ingest(accepted(1, 1));
+        publisher.ingest(vec![accepted(1, 1)]);
         publisher.tick();
         let _ = next_update(&mut rx);
         for _ in 0..2 {
@@ -319,7 +322,7 @@ mod tests {
         let mut publisher = Publisher::new(market());
         let mut rx = publisher.subscribe().updates;
         for seq in 1..=3 * u64::from(SECOND) {
-            publisher.ingest(accepted(seq, seq));
+            publisher.ingest(vec![accepted(seq, seq)]);
             assert_eq!(publisher.tick(), Some(seq));
             assert!(matches!(next_update(&mut rx), FeedMessage::Update { .. }));
         }
@@ -331,12 +334,49 @@ mod tests {
         let mut publisher = Publisher::new(market());
         let mut rx = publisher.subscribe().updates;
         assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
-        publisher.ingest(accepted(1, 1));
+        publisher.ingest(vec![accepted(1, 1)]);
         publisher.tick();
         let _ = next_update(&mut rx);
         assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
         let beat = idle(&mut publisher, &mut rx, 1);
         assert_eq!(beat, vec![FeedMessage::Heartbeat { seq: 1 }]);
+    }
+
+    #[test]
+    fn a_commands_events_are_never_split_across_updates() {
+        let mut matcher = SequencedMatcher::new();
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        let place = |order_id, side, price, qty, time_in_force| Command::Place {
+            order_id,
+            side,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force,
+            },
+            qty,
+        };
+        for (id, price) in [(1, 101), (2, 102)] {
+            let ask = place(id, Side::Sell, price, 1, TimeInForce::Gtc);
+            publisher.ingest(matcher.apply(0, ask));
+        }
+        publisher.tick();
+        next_update(&mut rx);
+
+        let sweep = place(3, Side::Buy, 102, 2, TimeInForce::Ioc);
+        publisher.ingest(matcher.apply(0, sweep));
+        assert_eq!(publisher.tick(), Some(2));
+
+        let FeedMessage::Update { asks, events, .. } = next_update(&mut rx) else {
+            panic!("expected an update");
+        };
+        let trades = events
+            .iter()
+            .filter(|e| matches!(e.body, Event::Trade { .. }))
+            .count();
+        assert_eq!(trades, 2, "both trades arrive together");
+        assert_eq!(asks, vec![lvl(101, 0), lvl(102, 0)], "with both levels");
+        assert_eq!(publisher.tick(), None, "nothing of it is left for later");
     }
 
     #[test]
@@ -352,12 +392,12 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            publisher.ingest(l2(i as u64 + 1, side, price, 1));
+            publisher.ingest(vec![l2(i as u64 + 1, side, price, 1)]);
         }
-        publisher.ingest(accepted(6, 1));
+        publisher.ingest(vec![accepted(6, 1)]);
         publisher.tick();
-        publisher.ingest(accepted(7, 2));
-        publisher.ingest(l2(8, Side::Buy, 97, 1));
+        publisher.ingest(vec![accepted(7, 2)]);
+        publisher.ingest(vec![l2(8, Side::Buy, 97, 1)]);
 
         let FeedMessage::Snapshot {
             seq,
@@ -381,7 +421,7 @@ mod tests {
         let mut publisher = Publisher::new(market());
         let total = RECENT_EVENTS as u64 + 10;
         for seq in 1..=total {
-            publisher.ingest(accepted(seq, seq));
+            publisher.ingest(vec![accepted(seq, seq)]);
         }
         publisher.tick();
         let FeedMessage::Snapshot { events, .. } = publisher.subscribe().snapshot else {
@@ -471,12 +511,14 @@ mod tests {
 
         for i in 0..600 {
             let step = walk.step();
-            for envelope in matcher.apply(step.ts, step.command) {
-                if !matches!(envelope.body, Event::L2Update { .. }) {
-                    flow_seqs.push(envelope.seq);
-                }
-                publisher.ingest(envelope);
-            }
+            let events = matcher.apply(step.ts, step.command);
+            flow_seqs.extend(
+                events
+                    .iter()
+                    .filter(|e| !matches!(e.body, Event::L2Update { .. }))
+                    .map(|e| e.seq),
+            );
+            publisher.ingest(events);
             // Joins land before ticks, after ticks and with events pending.
             if i % 2 == 0 {
                 let Subscription { snapshot, updates } = publisher.subscribe();

@@ -7,13 +7,19 @@ use protocol::{Command, Envelope, Event, Seq, Ts};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-/// Capacity of the queue between the engine thread and the publisher.
+/// Capacity of the queue between the engine thread and the publisher, in
+/// commands.
 ///
-/// The engine waits when the queue is full instead of dropping events, so the
-/// capacity only has to absorb bursts and publisher scheduling hiccups, not
-/// sustained overload. The walk's order flow produces about 38 events per
-/// second (measured: about 2.3 per command), so 4096 slots hold well over a
-/// minute of output, far more than the publisher's 100 ms tick needs.
+/// A slot holds all events of one command, so the publisher takes them in one
+/// step and no update splits them. A taker produces one trade per resting
+/// order it fills plus an update per level, so a batch has no small fixed
+/// bound: the queue bounds commands, and its memory is the capacity times the
+/// events per command. The engine waits when the queue is full instead of
+/// dropping events, so the capacity only has to absorb bursts and publisher
+/// scheduling hiccups, not sustained overload. The walk's order flow produces
+/// about 17 commands per second (measured: about 2.3 events per command), so
+/// 4096 slots hold several minutes of output, far more than the publisher's
+/// 100 ms tick needs.
 pub const EVENT_QUEUE_CAPACITY: usize = 4096;
 
 /// A matcher that numbers its output.
@@ -56,9 +62,10 @@ impl SequencedMatcher {
 ///
 /// The thread owns a [`SequencedMatcher`], runs every command from `commands`
 /// through it in arrival order, stamped with the envelope's venue time, and
-/// sends the resulting events to `events`. It stops once `commands` is closed
-/// and drained, or as soon as a send fails because the receiving end of
-/// `events` is gone; while it waits for a command it cannot notice that.
+/// sends the resulting events to `events`, one item per command. It stops once
+/// `commands` is closed and drained, or as soon as a send fails because the
+/// receiving end of `events` is gone; while it waits for a command it cannot
+/// notice that.
 ///
 /// It also stops, with a panic and before matching it, at a command whose
 /// `seq` is not the one after the previous command's, starting from 1:
@@ -70,7 +77,7 @@ impl SequencedMatcher {
 /// the sender to stop.
 pub fn spawn(
     mut commands: mpsc::Receiver<Envelope<Command>>,
-    events: mpsc::Sender<Envelope<Event>>,
+    events: mpsc::Sender<Vec<Envelope<Event>>>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().name("engine".into()).spawn(move || {
         info!("engine started");
@@ -82,11 +89,10 @@ pub fn spawn(
                 "the command sequence has a gap or is out of order"
             );
             next_seq += 1;
-            for envelope in matcher.apply(command.ts, command.body) {
-                // A full queue blocks here: backpressure, never a dropped event.
-                if events.blocking_send(envelope).is_err() {
-                    break 'run;
-                }
+            let batch = matcher.apply(command.ts, command.body);
+            // A full queue blocks here: backpressure, never a dropped event.
+            if events.blocking_send(batch).is_err() {
+                break 'run;
             }
         }
         debug!("engine stopped");
@@ -168,12 +174,13 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// What the matcher alone returns for `commands()`, sequenced from 1.
-    fn expected() -> Vec<Envelope<Event>> {
+    /// What the matcher alone returns for `commands()`, sequenced from 1, one
+    /// batch per command.
+    fn expected() -> Vec<Vec<Envelope<Event>>> {
         let mut sequenced = SequencedMatcher::new();
         commands()
             .into_iter()
-            .flat_map(|(ts, command)| sequenced.apply(ts, command))
+            .map(|(ts, command)| sequenced.apply(ts, command))
             .collect()
     }
 
@@ -195,7 +202,7 @@ mod tests {
         finish(handle).await.expect("engine thread does not panic");
     }
 
-    async fn next(events: &mut mpsc::Receiver<Envelope<Event>>) -> Envelope<Event> {
+    async fn next(events: &mut mpsc::Receiver<Vec<Envelope<Event>>>) -> Vec<Envelope<Event>> {
         timeout(WAIT, events.recv())
             .await
             .expect("an event arrives")
@@ -232,8 +239,8 @@ mod tests {
 
         join(thread).await;
         let mut delivered = Vec::new();
-        while let Some(envelope) = events.recv().await {
-            delivered.push(envelope);
+        while let Some(batch) = events.recv().await {
+            delivered.push(batch);
         }
         assert_eq!(delivered, expected());
     }
@@ -260,7 +267,7 @@ mod tests {
         for command in envelopes() {
             command_tx.send(command).await.expect("engine is running");
         }
-        // Nobody reads until the first event fills the one-slot queue, so the
+        // Nobody reads until the first batch fills the one-slot queue, so the
         // engine's next send has to wait for the reads below.
         timeout(WAIT, async {
             while events.len() < events.max_capacity() {
@@ -271,7 +278,7 @@ mod tests {
         .expect("the engine fills the event queue");
 
         let expected = expected();
-        assert!(expected.len() > 2, "more events than the queue holds");
+        assert!(expected.len() > 1, "more batches than the queue holds");
         for want in &expected {
             assert_eq!(&next(&mut events).await, want);
         }
@@ -294,9 +301,7 @@ mod tests {
 
             let mut reference = SequencedMatcher::new();
             for (ts, body) in commands().into_iter().take(matched) {
-                for want in &reference.apply(ts, body) {
-                    assert_eq!(&next(&mut events).await, want);
-                }
+                assert_eq!(next(&mut events).await, reference.apply(ts, body));
             }
             let payload = finish(thread).await.expect_err("the thread panics");
             let message = payload
