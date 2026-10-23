@@ -4,7 +4,7 @@
 <rect width="680" height="650" fill="#ffffff"/>
 <rect x="40" y="40" width="180" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="130.0" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#444441" text-anchor="middle" dominant-baseline="central">Hyperliquid data</text>
-<text x="130.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central">Archive or live node</text>
+<text x="130.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central">Recordings or live feed</text>
 <rect x="250" y="40" width="180" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="340.0" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#444441" text-anchor="middle" dominant-baseline="central">Synthetic generator</text>
 <text x="340.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central">Random + fuzz flow</text>
@@ -19,7 +19,7 @@
 <path d="M550 96 L550 200 L410 200 L410 218" fill="none" stroke="#73726c" stroke-width="1" marker-end="url(#arrow)"/>
 <rect x="190" y="220" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
 <text x="340.0" y="238" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#3C3489" text-anchor="middle" dominant-baseline="central">Replayer</text>
-<text x="340.0" y="258" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#534AB7" text-anchor="middle" dominant-baseline="central">Real-time, fast or stepped</text>
+<text x="340.0" y="258" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#534AB7" text-anchor="middle" dominant-baseline="central">Recorded (paced or stepped) or live</text>
 <rect x="40" y="316" width="600" height="176" rx="20" fill="none" stroke="#B4B2A9" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="270" y="340" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="start" dominant-baseline="central">Order book service</text>
 <text x="620" y="340" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="end" dominant-baseline="central">Linked by in-memory queues</text>

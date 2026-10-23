@@ -10,6 +10,7 @@ description = "Plays recorded order flow into the order book service."
 anyhow.workspace = true
 engine.workspace = true
 hyperliquid-adapter.workspace = true
+hyperliquid-recorder.workspace = true
 matching.workspace = true
 protocol.workspace = true
 serde.workspace = true

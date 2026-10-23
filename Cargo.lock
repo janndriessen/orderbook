@@ -1306,6 +1306,7 @@ dependencies = [
  "engine",
  "futures-util",
  "hyperliquid-adapter",
+ "hyperliquid-recorder",
  "matching",
  "protocol",
  "serde",
