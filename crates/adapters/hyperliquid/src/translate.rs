@@ -17,6 +17,11 @@ use crate::{BookLevel, BookSnapshot, Trade, TradeSide};
 /// because the adapter does not depend on the engine.
 const MAX_ORDER_QTY: Qty = 100_000_000;
 
+/// Most orders one growth of a level, or one trade, is split into: 100 pieces
+/// of the maximum size are 10,000 BTC, far above any real level, so a larger
+/// quantity is a corrupt record and bounds the commands one line can cause.
+const MAX_PIECES: Qty = 100;
+
 /// How far the engine's book is known to differ from the source's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Divergence {
@@ -29,9 +34,8 @@ pub struct Divergence {
     /// Lots of a taker order that filled at a price other than the trade's
     /// own, which happens when a stale shadow book holds better-priced orders.
     pub off_price_fill_qty: u64,
-    /// Orders not emitted because the engine's gateway would refuse them: a
-    /// quantity of zero or above its maximum order size, or a price outside
-    /// its bounds.
+    /// Orders not emitted because no split of them is acceptable: a quantity
+    /// of zero or above the split limit, or a price outside the gateway's bounds.
     pub skipped_commands: u64,
 }
 
@@ -58,29 +62,31 @@ impl Translator {
         self.divergence
     }
 
-    /// One immediate-or-cancel limit order at the trade's price and size on
-    /// the taker's side.
+    /// Immediate-or-cancel limit orders at the trade's price on the taker's
+    /// side, adding up to the trade's size (see `place`). A trade record
+    /// above the gateway's maximum order size is unusual; its pieces replay
+    /// the size faithfully, which is better than dropping it.
     pub fn on_trade(&mut self, trade: &Trade) -> Vec<(Ts, Command)> {
         let side = match trade.side {
             TradeSide::B => Side::Buy,
             TradeSide::A => Side::Sell,
         };
-        let Some((command, events)) = self.place(side, trade.price, TimeInForce::Ioc, trade.qty)
-        else {
-            return Vec::new();
-        };
-        for event in events {
-            match event {
-                Event::Trade { price, qty, .. } if price != trade.price => {
-                    self.divergence.off_price_fill_qty += qty;
+        let mut out = Vec::new();
+        for (command, events) in self.place(side, trade.price, TimeInForce::Ioc, trade.qty) {
+            for event in events {
+                match event {
+                    Event::Trade { price, qty, .. } if price != trade.price => {
+                        self.divergence.off_price_fill_qty += qty;
+                    }
+                    Event::Canceled { leaves_qty, .. } => {
+                        self.divergence.unfilled_taker_qty += leaves_qty;
+                    }
+                    _ => {}
                 }
-                Event::Canceled { leaves_qty, .. } => {
-                    self.divergence.unfilled_taker_qty += leaves_qty;
-                }
-                _ => {}
             }
+            out.push((trade.ts, command));
         }
-        vec![(trade.ts, command)]
+        out
     }
 
     /// Commands that make the shadow book show the snapshot's levels.
@@ -88,7 +94,8 @@ impl Translator {
     /// Cancels and replaces come first, so a post-only order never meets a
     /// quantity that is about to go: levels missing from the snapshot are
     /// canceled whole, levels that shrank lose their newest orders first, and
-    /// levels that grew get one post-only order for the difference.
+    /// levels that grew get post-only orders adding up to the difference (see
+    /// `place`).
     pub fn on_snapshot(&mut self, snapshot: &BookSnapshot) -> Vec<(Ts, Command)> {
         self.mirror(snapshot, |_| true, |_| true)
     }
@@ -131,6 +138,8 @@ impl Translator {
             let mut wanted: BTreeMap<Price, Qty> = BTreeMap::new();
             for level in nonzero(levels) {
                 let qty = wanted.entry(level.price).or_default();
+                // A total beyond any order's reach stays huge, so `place`
+                // skips and counts it instead of mirroring a wrong quantity.
                 *qty = qty.saturating_add(level.qty);
             }
             let in_window = |price: Price| match side {
@@ -161,7 +170,7 @@ impl Translator {
             out.push((ts, command));
         }
         for (side, price, qty) in places {
-            if let Some((command, events)) = self.place(side, price, TimeInForce::PostOnly, qty) {
+            for (command, events) in self.place(side, price, TimeInForce::PostOnly, qty) {
                 if events
                     .iter()
                     .any(|event| matches!(event, Event::Rejected { .. }))
@@ -174,32 +183,43 @@ impl Translator {
         out
     }
 
-    /// Applies a limit order to the shadow and returns it with the shadow's
-    /// events, or `None` if the gateway would refuse it.
+    /// Applies limit orders adding up to `qty` to the shadow and returns each
+    /// with the shadow's events. A level is the sum of many source orders, so
+    /// `qty` may exceed the gateway's maximum order size: it is split into
+    /// orders of that size and a last one with the remainder, at most
+    /// `MAX_PIECES` of them. Nothing is placed, and the skip is counted, for a
+    /// quantity of zero or above that limit, or a price the gateway refuses.
     fn place(
         &mut self,
         side: Side,
         price: Price,
         time_in_force: TimeInForce,
         qty: Qty,
-    ) -> Option<(Command, Vec<Event>)> {
+    ) -> Vec<(Command, Vec<Event>)> {
         let price_ok = u64::try_from(price).is_ok_and(|p| (1..=MAX_VALUE).contains(&p));
-        if !(1..=MAX_ORDER_QTY).contains(&qty) || !price_ok {
+        if !(1..=MAX_PIECES * MAX_ORDER_QTY).contains(&qty) || !price_ok {
             self.divergence.skipped_commands += 1;
-            return None;
+            return Vec::new();
         }
-        self.last_id += 1;
-        let command = Command::Place {
-            order_id: self.last_id,
-            side,
-            order_type: OrderType::Limit {
-                price,
-                time_in_force,
-            },
-            qty,
-        };
-        let events = self.shadow.apply(command);
-        Some((command, events))
+        let mut placed = Vec::new();
+        let mut left = qty;
+        while left > 0 {
+            let piece = left.min(MAX_ORDER_QTY);
+            left -= piece;
+            self.last_id += 1;
+            let command = Command::Place {
+                order_id: self.last_id,
+                side,
+                order_type: OrderType::Limit {
+                    price,
+                    time_in_force,
+                },
+                qty: piece,
+            };
+            let events = self.shadow.apply(command);
+            placed.push((command, events));
+        }
+        placed
     }
 }
 
@@ -270,6 +290,18 @@ mod tests {
             order_type: OrderType::Limit {
                 price,
                 time_in_force: TimeInForce::PostOnly,
+            },
+            qty,
+        }
+    }
+
+    fn ioc(order_id: OrderId, side: Side, price: Price, qty: Qty) -> Command {
+        Command::Place {
+            order_id,
+            side,
+            order_type: OrderType::Limit {
+                price,
+                time_in_force: TimeInForce::Ioc,
             },
             qty,
         }
@@ -505,13 +537,14 @@ mod tests {
                 &[]
             ))
             .len(),
-            0
+            2
         );
-        assert_eq!(t.divergence().skipped_commands, 1);
+        assert_eq!(t.divergence().skipped_commands, 0);
         assert_eq!(
             t.on_snapshot(&snap(3, &[(100, MAX_ORDER_QTY), (max_price, 1)], &[]))
                 .len(),
-            1
+            3,
+            "two cancels for the dropped level and one place"
         );
         assert_eq!(
             t.on_snapshot(&snap(
@@ -527,19 +560,175 @@ mod tests {
             .len(),
             0
         );
-        assert_eq!(t.divergence().skipped_commands, 3);
-        assert!(
+        assert_eq!(t.divergence().skipped_commands, 2);
+        assert_eq!(
             t.on_trade(&trade(5, TradeSide::A, 100, MAX_ORDER_QTY + 1))
-                .is_empty()
+                .len(),
+            2
         );
         assert!(t.on_trade(&trade(6, TradeSide::A, 100, 0)).is_empty());
-        assert_eq!(t.divergence().skipped_commands, 5);
+        assert!(t.on_trade(&trade(6, TradeSide::A, 0, 1)).is_empty());
+        assert_eq!(t.divergence().skipped_commands, 4);
         assert_eq!(t.divergence().unfilled_taker_qty, 0);
+        assert_eq!(t.divergence().off_price_fill_qty, 1);
         assert_eq!(
             t.on_snapshot(&snap(7, &[(100, MAX_ORDER_QTY), (max_price, 1)], &[]))
                 .len(),
-            0
+            2,
+            "the oversized trade consumed both levels, which are posted again"
         );
+    }
+
+    #[test]
+    fn a_level_above_the_order_limit_grows_into_bounded_orders() {
+        let mut t = Translator::new();
+        let full = snap(1, &[(100, MAX_ORDER_QTY + 1)], &[]);
+        assert_eq!(
+            commands(t.on_snapshot(&full)),
+            [
+                post(1, Side::Buy, 100, MAX_ORDER_QTY),
+                post(2, Side::Buy, 100, 1)
+            ]
+        );
+        assert_eq!(levels_of(&t, Side::Buy), [(100, MAX_ORDER_QTY + 1)]);
+        assert!(t.on_snapshot(&full).is_empty());
+        assert_eq!(t.divergence(), Divergence::default());
+    }
+
+    #[test]
+    fn a_level_of_twice_the_limit_gives_two_full_orders() {
+        let mut t = Translator::new();
+        let out = t.on_snapshot(&snap(1, &[(100, 2 * MAX_ORDER_QTY)], &[]));
+        assert_eq!(
+            commands(out),
+            [
+                post(1, Side::Buy, 100, MAX_ORDER_QTY),
+                post(2, Side::Buy, 100, MAX_ORDER_QTY)
+            ]
+        );
+    }
+
+    #[test]
+    fn growth_across_the_limit_from_a_resting_level_is_split() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(100, 5)], &[]));
+        let grown = snap(2, &[(100, MAX_ORDER_QTY + 10)], &[]);
+        assert_eq!(
+            commands(t.on_snapshot(&grown)),
+            [
+                post(2, Side::Buy, 100, MAX_ORDER_QTY),
+                post(3, Side::Buy, 100, 5)
+            ]
+        );
+        assert_eq!(levels_of(&t, Side::Buy), [(100, MAX_ORDER_QTY + 10)]);
+        assert!(t.on_snapshot(&grown).is_empty());
+    }
+
+    #[test]
+    fn a_split_level_shrinks_from_its_newest_piece() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(100, 2 * MAX_ORDER_QTY + 1)], &[]));
+        let out = t.on_snapshot(&snap(2, &[(100, MAX_ORDER_QTY + 1)], &[]));
+        assert_eq!(
+            commands(out),
+            [
+                cancel(3),
+                Command::Replace {
+                    order_id: 2,
+                    price: 100,
+                    qty: 1
+                }
+            ]
+        );
+        assert_eq!(levels_of(&t, Side::Buy), [(100, MAX_ORDER_QTY + 1)]);
+    }
+
+    #[test]
+    fn a_top_snapshot_splits_an_oversized_level_too() {
+        let mut t = Translator::new();
+        let out = t.on_top(&snap(1, &[(100, MAX_ORDER_QTY + 1)], &[(101, 1)]));
+        assert_eq!(
+            commands(out),
+            [
+                post(1, Side::Buy, 100, MAX_ORDER_QTY),
+                post(2, Side::Buy, 100, 1),
+                post(3, Side::Sell, 101, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trade_of_twice_the_limit_gives_two_immediate_orders() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[], &[(101, 2 * MAX_ORDER_QTY)]));
+        let out = t.on_trade(&trade(2, TradeSide::B, 101, 2 * MAX_ORDER_QTY));
+        assert_eq!(
+            commands(out),
+            [
+                ioc(3, Side::Buy, 101, MAX_ORDER_QTY),
+                ioc(4, Side::Buy, 101, MAX_ORDER_QTY)
+            ]
+        );
+        assert!(levels_of(&t, Side::Sell).is_empty());
+        assert_eq!(t.divergence(), Divergence::default());
+    }
+
+    #[test]
+    fn an_oversized_trade_becomes_immediate_orders_that_fill_the_level() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[], &[(101, MAX_ORDER_QTY + 5)]));
+        let out = t.on_trade(&trade(2, TradeSide::B, 101, MAX_ORDER_QTY + 3));
+        assert_eq!(
+            commands(out),
+            [
+                ioc(3, Side::Buy, 101, MAX_ORDER_QTY),
+                ioc(4, Side::Buy, 101, 3)
+            ]
+        );
+        assert_eq!(levels_of(&t, Side::Sell), [(101, 2)]);
+        assert_eq!(t.divergence(), Divergence::default());
+    }
+
+    #[test]
+    fn unfilled_quantity_adds_up_across_the_pieces_of_a_trade() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[], &[(101, 5)]));
+        t.on_trade(&trade(2, TradeSide::B, 101, MAX_ORDER_QTY + 7));
+        assert_eq!(t.divergence().unfilled_taker_qty, MAX_ORDER_QTY + 2);
+    }
+
+    #[test]
+    fn the_split_is_bounded() {
+        let largest = MAX_PIECES * MAX_ORDER_QTY;
+        let mut t = Translator::new();
+        assert_eq!(
+            t.on_snapshot(&snap(1, &[(100, largest)], &[])).len(),
+            MAX_PIECES as usize
+        );
+        assert_eq!(levels_of(&t, Side::Buy), [(100, largest)]);
+        assert_eq!(t.on_trade(&trade(2, TradeSide::A, 100, largest)).len(), 100);
+        assert_eq!(t.divergence().skipped_commands, 0);
+
+        let mut t = Translator::new();
+        assert!(
+            t.on_snapshot(&snap(1, &[(100, largest + 1)], &[]))
+                .is_empty()
+        );
+        assert!(
+            t.on_trade(&trade(2, TradeSide::A, 100, largest + 1))
+                .is_empty()
+        );
+        assert_eq!(t.divergence().skipped_commands, 2);
+        assert!(t.shadow.book().is_empty());
+    }
+
+    #[test]
+    fn a_level_total_beyond_the_value_bound_is_skipped() {
+        let mut t = Translator::new();
+        let out = t.on_snapshot(&snap(1, &[(100, MAX_VALUE), (100, MAX_VALUE)], &[]));
+        assert!(out.is_empty());
+        assert_eq!(t.divergence().skipped_commands, 1);
+        assert!(t.shadow.book().is_empty());
     }
 
     const DEEP_BIDS: [(Price, Qty); 4] = [(100, 5), (99, 5), (98, 5), (97, 5)];
