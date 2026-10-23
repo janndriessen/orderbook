@@ -46,7 +46,7 @@ use crate::message::{BookLevel, BookSnapshot};
 const WINDOW: usize = 20;
 
 /// One price grouping of the `l2` feed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Grouping {
     /// Significant figures the reference price is rounded to, 2 to 5.
     pub sig_figs: u32,
@@ -56,6 +56,12 @@ pub struct Grouping {
 }
 
 impl Grouping {
+    /// Whether the source offers this grouping: 2 to 4 significant figures
+    /// with a mantissa of 1, or 5 with a mantissa of 1, 2 or 5.
+    pub fn is_offered(self) -> bool {
+        matches!((self.sig_figs, self.mantissa), (2..=4, 1) | (5, 1 | 2 | 5))
+    }
+
     /// The width of this grouping's buckets, in ticks, for a book whose
     /// reference price is `reference`. With prices below 2^53 (16 digits) and
     /// at least 2 significant figures, it stays below 5 * 10^14.
@@ -158,11 +164,7 @@ pub fn merge(groupings: &[(Grouping, &BookSnapshot)]) -> Result<Merged, MergeErr
         if book.ts != first.ts {
             return Err(MergeError::Times(first.ts, book.ts));
         }
-        let supported = matches!(
-            (grouping.sig_figs, grouping.mantissa),
-            (2..=4, 1) | (5, 1 | 2 | 5)
-        );
-        if !supported {
+        if !grouping.is_offered() {
             return Err(MergeError::Grouping(grouping));
         }
         if groupings[..index]

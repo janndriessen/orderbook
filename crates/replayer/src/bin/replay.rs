@@ -9,7 +9,9 @@
 //! final book stays served until Ctrl-C. The replay starts at the first full
 //! book snapshot: trades at or before it and top-of-book snapshots (best bid
 //! and offer messages included) before it are dropped, and a recording without
-//! a full snapshot is refused.
+//! a full snapshot is refused. In a recording with `l2` lines, the first full
+//! snapshot is the first push all price groupings share, and every `l2Book`
+//! and `bbo` line is skipped.
 
 use std::io::BufRead;
 use std::iter;
@@ -49,12 +51,38 @@ async fn main() -> anyhow::Result<()> {
         dropped_trades = loaded.dropped_trades,
         dropped_top_snapshots = loaded.dropped_top_snapshots,
         skipped_bbos = loaded.skipped_bbos,
-        skipped_l2_lines = loaded.skipped_l2_lines,
+        dropped_late_trades = loaded.dropped_late_trades,
+        skipped_book_lines = loaded.skipped_book_lines,
+        startup_pushes = loaded.startup_pushes,
+        skipped_pushes = loaded.skipped_pushes,
+        trailing_pushes = loaded.trailing_pushes,
+        failed_merges = loaded.failed_merges,
+        conflicting_qty = loaded.conflicting_qty,
         divergence = ?loaded.divergence,
         "recording loaded"
     );
     if loaded.incomplete_last_line {
         warn!("the last line is incomplete and was left out; is the recorder still running?");
+    }
+    if loaded.skipped_pushes > 0 {
+        warn!(
+            pushes = loaded.skipped_pushes,
+            "l2 pushes without every price grouping were left out after start-up"
+        );
+    }
+    if let Some((ts, error)) = &loaded.first_merge_error {
+        warn!(
+            pushes = loaded.failed_merges,
+            ts,
+            %error,
+            "l2 pushes whose price groupings do not merge were left out (first one shown)"
+        );
+    }
+    if loaded.dropped_late_trades > 0 {
+        warn!(
+            trades = loaded.dropped_late_trades,
+            "trades after the last complete l2 push were left out"
+        );
     }
     if loaded.skipped_error_lines > 0 {
         warn!(
