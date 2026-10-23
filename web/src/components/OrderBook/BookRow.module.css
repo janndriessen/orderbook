@@ -26,3 +26,22 @@
   color: var(--side-color);
   text-align: left;
 }
+
+/* Plays once per mount and ends on transparent, so it leaves no trace. */
+.flash {
+  animation: flash var(--duration-flash) var(--ease-out);
+}
+
+@keyframes flash {
+  from {
+    background: color-mix(
+      in srgb,
+      var(--side-color) var(--flash-strength),
+      transparent
+    );
+  }
+
+  to {
+    background: transparent;
+  }
+}

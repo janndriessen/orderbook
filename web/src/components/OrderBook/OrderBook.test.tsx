@@ -159,4 +159,53 @@ describe("OrderBook", () => {
       );
     }
   });
+
+  describe("size flash", () => {
+    const book = (bestAskQty: number) =>
+      bookOf(
+        snapshot({
+          asks: [level(1_000_050, bestAskQty), level(1_000_100, 2_500)],
+          bids: [level(1_000_000, 1_000)],
+        }),
+      );
+    // Asks render furthest first, so the best ask is the second row.
+    const marks = () =>
+      screen
+        .getAllByRole("row")
+        .filter((row) => within(row).queryAllByRole("cell").length === 3)
+        .map((row) => row.querySelector("[data-changes]"));
+
+    it("does not flash on first appearance or when nothing changed", () => {
+      const { rerender } = render(
+        <OrderBook book={book(1_500)} market={market} />,
+      );
+      const first = marks();
+      expect(first.map((m) => m?.getAttribute("data-changes"))).toEqual([
+        "0",
+        "0",
+        "0",
+      ]);
+      rerender(<OrderBook book={book(1_500)} market={market} />);
+      expect(marks()).toEqual(first);
+    });
+
+    it("restarts the flash of the changed level on every change, and only there", () => {
+      const { rerender } = render(
+        <OrderBook book={book(1_500)} market={market} />,
+      );
+      const [far0, best0, bid0] = marks();
+
+      rerender(<OrderBook book={book(900)} market={market} />);
+      const [far1, best1, bid1] = marks();
+      expect(best1).not.toBe(best0);
+      expect(best1?.getAttribute("data-changes")).toBe("1");
+      expect([far1, bid1]).toEqual([far0, bid0]);
+
+      rerender(<OrderBook book={book(700)} market={market} />);
+      const [far2, best2, bid2] = marks();
+      expect(best2).not.toBe(best1);
+      expect(best2?.getAttribute("data-changes")).toBe("2");
+      expect([far2, bid2]).toEqual([far0, bid0]);
+    });
+  });
 });

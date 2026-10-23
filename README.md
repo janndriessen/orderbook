@@ -31,6 +31,7 @@ The book is a panel of 12 rows per side around a spread bar that stays put.
 A side with fewer levels keeps its slots and leaves its far end blank.
 On a window too short for 12 rows per side, the panel shows as many as fit.
 Numbers change at once while the depth bars ease to their new width.
+A level whose size changes flashes briefly.
 A toggle opens the flow log beside it, with filtering and pause.
 The log is ready to show rejected orders and refused cancels and replaces; the random-walk order flow never provokes them.
 The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
