@@ -190,6 +190,8 @@ pub struct Loaded {
     /// Whether the last line was cut off and left out, as happens while the
     /// recorder is still writing.
     pub incomplete_last_line: bool,
+    /// Lines of the `l2` feed, which replays do not use yet and skip.
+    pub skipped_l2_lines: usize,
 }
 
 /// The most levels per side that a snapshot of only the top of the book
@@ -231,12 +233,13 @@ impl Recorded {
 /// is left out and counted in `skipped_bbos`.
 ///
 /// Subscription acknowledgements and `pong` replies are skipped, as are empty
-/// lines. Recorded order can differ from time order, so the data is sorted by
-/// time (stable) before it is translated. Trades at or before the first full
-/// snapshot's time are dropped: the first trades message after subscribing is
-/// a backlog, and a snapshot already reflects every trade up to its time. Top
-/// snapshots before the first full one are dropped too, so the replay always
-/// starts from a full book.
+/// lines. Lines of the `l2` feed are skipped unparsed and counted in
+/// `skipped_l2_lines`. Recorded order can differ from time order, so the data
+/// is sorted by time (stable) before it is translated. Trades at or before the
+/// first full snapshot's time are dropped: the first trades message after
+/// subscribing is a backlog, and a snapshot already reflects every trade up to
+/// its time. Top snapshots before the first full one are dropped too, so the
+/// replay always starts from a full book.
 ///
 /// A recording that does not end with a line break may end in the middle of a
 /// line, because the recorder writes in blocks while it runs; such a last line
@@ -250,6 +253,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
     let unfinished_line = (!recording.ends_with('\n')).then(|| recording.lines().count());
     let mut incomplete_last_line = false;
     let mut skipped_bbos = 0;
+    let mut skipped_l2_lines = 0;
     let mut recorded = Vec::new();
     for (index, text) in recording.lines().enumerate() {
         let line = index + 1;
@@ -272,6 +276,10 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
             Err(source) => return Err(parse(source)),
         };
         if matches!(channel.as_deref(), Some("subscriptionResponse" | "pong")) {
+            continue;
+        }
+        if channel.as_deref() == Some("l2") {
+            skipped_l2_lines += 1;
             continue;
         }
         if !matches!(channel.as_deref(), Some("l2Book" | "bbo" | "trades")) {
@@ -300,8 +308,8 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
                     recorded.push(Recorded::Trade(trade.to_trade(market).map_err(convert)?));
                 }
             }
-            // The channel check above already turns `l2` lines away; they are
-            // not replayed yet.
+            // `l2` lines are skipped before parsing; one that got here would
+            // not be replayed, so it is refused rather than dropped quietly.
             Message::L2(_) => {
                 let channel = "l2".to_owned();
                 return Err(LoadError::Channel { line, channel });
@@ -337,6 +345,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         dropped_top_snapshots,
         skipped_bbos,
         incomplete_last_line,
+        skipped_l2_lines,
     })
 }
 
@@ -643,10 +652,17 @@ mod tests {
         assert!(err.to_string().starts_with("line 8:"));
         let err = load(&recording(&["{}"]), &engine::market()).unwrap_err();
         assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "(none)"));
-        // The adapter parses `l2` lines, but replays do not use them yet.
-        let l2 = r#"{"channel":"l2","data":{"c":"abc"}}"#;
-        let err = load(&recording(&[l2]), &engine::market()).unwrap_err();
-        assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "l2"));
+    }
+
+    #[test]
+    fn l2_lines_are_skipped_and_counted() {
+        let l2 =
+            r#"{"channel":"l2","data":{"c":"abc"},"subscription":{"type":"l2","c":"BTC","s":5}}"#;
+        let with = load(&recording(&[l2, l2]), &engine::market()).expect("loads");
+        let without = load(&recording(&[]), &engine::market()).expect("loads");
+        assert_eq!(with.skipped_l2_lines, 2);
+        assert_eq!(without.skipped_l2_lines, 0);
+        assert_eq!(with.commands, without.commands);
     }
 
     #[test]

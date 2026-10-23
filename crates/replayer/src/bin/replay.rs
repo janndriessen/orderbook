@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         dropped_trades = loaded.dropped_trades,
         dropped_top_snapshots = loaded.dropped_top_snapshots,
         skipped_bbos = loaded.skipped_bbos,
+        skipped_l2_lines = loaded.skipped_l2_lines,
         divergence = ?loaded.divergence,
         "recording loaded"
     );

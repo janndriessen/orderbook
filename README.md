@@ -65,7 +65,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - a best bid and offer is a top snapshot of one level per side; one with a bid at or above the ask is skipped and counted
     - the replay starts at the first full snapshot: the trades at or before it (the backlog sent on subscribing, which the snapshot already reflects), and the top snapshots and best bid and offer messages before it, are dropped
     - the rest is translated with the adapter's `Translator`
-    - logs the translator's divergence counters, the dropped trades and top snapshots (best bid and offer messages included), the skipped locked or crossed ones, and recorded gaps over 60 s
+    - lines of the `l2` feed are skipped and counted; replays do not use them yet
+    - logs the translator's divergence counters, the dropped trades and top snapshots (best bid and offer messages included), the skipped locked or crossed ones, the skipped `l2` lines, and recorded gaps over 60 s
     - after the last command it keeps serving the final book until Ctrl-C
   - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against two recordings of public BTC data: 40 s without and 50 s with the best bid and offer
     - after replaying one, the matcher's book equals every recorded full snapshot exactly, and the top 5 levels per side equal every recorded top snapshot
@@ -73,11 +74,11 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots, best bid and offer messages and trades in time order
     - the exact number of records compared is asserted, counted from the fixtures' lines separately
   - [x] Step mode of the replayer: `REPLAY_SPEED=step` waits for Enter before each recorded moment
-  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (the standard and the fast feed), the best bid and offer, and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book, best bid and offer or trades message; acknowledgements, `pong` and `error` messages count as no progress
+  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (the standard and the fast feed), the best bid and offer, trades and the `l2` feed at all six price groupings from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot on the main connection (more than 5 levels on a side; catches a stalled standard feed and a silent main connection), or after 30 seconds without an `l2` message on one of the six connections; acknowledgements, `pong` and `error` messages count as no progress
   - [x] Re-measure level lengths and cancel cost on replayed Hyperliquid data: real levels stay short, so levels remain a `VecDeque` (`levels` binary, results under the price-levels trade-off)
 - [ ] A book that works like Hyperliquid's own, at every price grouping
   - [x] `hyperliquid-adapter`: `L2Decoder` for the `l2` feed that Hyperliquid's web app subscribes to (not in its API documentation): 20 levels per side about every 0.54 s, a full book on subscribing, then changes that remove levels by index and set levels by price, usually as base64 of a raw deflate stream of JSON and, for some small changes, as the same JSON uncompressed. Every resulting book is checked (strictly best first, at most 20 levels per side, no size of zero, best bid below best ask), and so is every change (a book to apply to, removed indices that exist once, each price set once per side, not older than its book, valid base64 and deflate, at most 1 MiB inflated, convertible values); any failed message drops the book until the next one, since a later change's indices would name the wrong levels. Replaying recorded changes gives exactly the book of a fresh subscription, and of the documented 20-level `l2Book` feed, at the same push (`crates/adapters/hyperliquid/tests/l2.rs`)
-  - [ ] Recorder: one connection per price grouping (no message says which grouping it is for)
+  - [x] Recorder: one connection per price grouping, six in all, since no `l2` message says which grouping it is for; the recorder adds the connection's `subscription` to every `l2` line
   - [ ] Merge the six groupings into one book of $1 levels
   - [ ] Replay: align the groupings by push time and hold trades until the next push
   - [ ] Oracle test per grouping
@@ -92,7 +93,7 @@ The pinned toolchain (Rust 1.99.1, see `rust-toolchain.toml`) is installed autom
 cargo test --workspace                   # also regenerates the TypeScript types in web/src/protocol/ and checks a replayed recording against the source's books
 cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
 cargo run -p harness --release --bin bench   # matcher throughput and cancel cost; release build only, numbers depend on the machine
-cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard and fast feed), the best bid and offer, and trades from Hyperliquid to data/, until Ctrl-C
+cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard, fast and l2 feeds), the best bid and offer, and trades from Hyperliquid to data/, until Ctrl-C
 REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # serves a recording through the engine
 REPLAY_PATH=data/<recording>.jsonl cargo run --release -p replayer --bin levels   # level lengths and cancel cost on a recording; release build only
 REPLAY_SPEED=step REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # Enter plays one recorded moment
@@ -126,7 +127,7 @@ crates/engine/     order book service: random-walk order flow, gateway, matcher 
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
 crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book`, `l2`, `bbo` and `trades` message types, decimal strings to ticks and lots; `l2` keeps the book of the `l2` feed from its changes; `translate` turns snapshots and trades into commands; depends on protocol and matching (plus serde, serde_json, base64, flate2 and compile-time thiserror)
-crates/adapters/hyperliquid-recorder/  `record` binary: records Hyperliquid's public BTC book and trades feed to a JSON Lines file; depends on tokio, tokio-tungstenite (rustls) and serde_json, not on the other crates
+crates/adapters/hyperliquid-recorder/  `record` binary: records Hyperliquid's public BTC book and trades feeds to a JSON Lines file, over six connections; depends on tokio, tokio-tungstenite (rustls) and serde_json, not on the other crates
 crates/replayer/   loads a recording into commands and paces them for the service (real time, n times or maximum speed); the `replay` binary serves a recording through the engine; the `levels` binary measures level lengths and cancel cost on a recording. The library depends on engine, protocol, the Hyperliquid adapter, serde, serde_json, thiserror and tracing; the binaries add anyhow, matching, tokio and tracing-subscriber; its tests add futures-util and tokio-tungstenite
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
@@ -167,5 +168,6 @@ Planned, not yet present: `data/` (recorded sessions, gitignored).
   - A full snapshot of a book with at most 5 levels per side cannot be told from a top snapshot, so it is mirrored only inside its window.
   - Stale levels beyond that window, or on a side that is empty in it, stay until the next full snapshot.
   - A stale side can make new orders on the other side be rejected (`rejected_makers`).
+- **Source feed:** the book at every price grouping comes from the `l2` feed Hyperliquid's web app uses, which its API documentation does not list. Its format was inferred from recordings and checked against fresh subscriptions and the documented 20-level feed; it can change without notice. The documented feeds are recorded too: the fast one has only 5 levels per side and the 20-level one comes only about every 5 s, too little to show the book the way the app does. Production systems that rely on outside market data use documented, versioned feeds under an agreement with the provider.
 - **Flow log:** the web UI keeps only the most recent events; production terminals offer a searchable history.
 - **Infrastructure:** a small shared-vCPU cloud server. Production uses dedicated hardware, often co-located, with tuned networking.
