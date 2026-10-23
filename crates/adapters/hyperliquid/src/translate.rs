@@ -31,12 +31,20 @@ pub struct Divergence {
     /// Trade quantity, in lots, that the shadow book could not fill because
     /// too little rested at the trade's price or better.
     pub unfilled_taker_qty: u64,
-    /// Lots of a taker order that filled at a price other than the trade's
-    /// own, which happens when a stale shadow book holds better-priced orders.
-    pub off_price_fill_qty: u64,
+    /// Orders canceled because a trade showed they no longer exist at the
+    /// source: a trade at a price means the opposite side had nothing resting
+    /// at a better one, so a shadow order there is stale.
+    pub stale_orders_canceled: u64,
     /// Orders not emitted because no split of them is acceptable: a quantity
     /// of zero or above the split limit, or a price outside the gateway's bounds.
     pub skipped_commands: u64,
+}
+
+/// Whether `Translator::place` accepts this price and total size: the price
+/// within the gateway's bounds and the size within the split limit.
+fn placeable(price: Price, qty: Qty) -> bool {
+    let price_ok = u64::try_from(price).is_ok_and(|p| (1..=MAX_VALUE).contains(&p));
+    (1..=MAX_PIECES * MAX_ORDER_QTY).contains(&qty) && price_ok
 }
 
 /// Turns the source's trades and snapshots into commands for the engine.
@@ -62,26 +70,48 @@ impl Translator {
         self.divergence
     }
 
-    /// Immediate-or-cancel limit orders at the trade's price on the taker's
+    /// Commands for one trade: cancels of the shadow orders on the opposite
+    /// side that rest at a better price than the trade's, then
+    /// immediate-or-cancel limit orders at the trade's price on the taker's
     /// side, adding up to the trade's size (see `place`). A trade record
     /// above the gateway's maximum order size is unusual; its pieces replay
     /// the size faithfully, which is better than dropping it.
+    ///
+    /// The source printed the trade at its price, so it held nothing better on
+    /// that side; any such shadow order is stale. Canceling it first keeps the
+    /// taker from filling at a price the source never traded at. A trade that
+    /// cannot be placed produces no commands at all, not even the cancels.
     pub fn on_trade(&mut self, trade: &Trade) -> Vec<(Ts, Command)> {
-        let side = match trade.side {
-            TradeSide::B => Side::Buy,
-            TradeSide::A => Side::Sell,
+        let (side, resting) = match trade.side {
+            TradeSide::B => (Side::Buy, Side::Sell),
+            TradeSide::A => (Side::Sell, Side::Buy),
         };
+        if !placeable(trade.price, trade.qty) {
+            self.divergence.skipped_commands += 1;
+            return Vec::new();
+        }
+        let better = |price: Price| match side {
+            Side::Buy => price < trade.price,
+            Side::Sell => price > trade.price,
+        };
+        let stale: Vec<Command> = self
+            .shadow
+            .book()
+            .levels(resting)
+            .filter(|&(price, _)| better(price))
+            .flat_map(|(_, level)| level.orders())
+            .map(|order_id| Command::Cancel { order_id })
+            .collect();
         let mut out = Vec::new();
+        for command in stale {
+            self.shadow.apply(command);
+            self.divergence.stale_orders_canceled += 1;
+            out.push((trade.ts, command));
+        }
         for (command, events) in self.place(side, trade.price, TimeInForce::Ioc, trade.qty) {
             for event in events {
-                match event {
-                    Event::Trade { price, qty, .. } if price != trade.price => {
-                        self.divergence.off_price_fill_qty += qty;
-                    }
-                    Event::Canceled { leaves_qty, .. } => {
-                        self.divergence.unfilled_taker_qty += leaves_qty;
-                    }
-                    _ => {}
+                if let Event::Canceled { leaves_qty, .. } = event {
+                    self.divergence.unfilled_taker_qty += leaves_qty;
                 }
             }
             out.push((trade.ts, command));
@@ -197,8 +227,7 @@ impl Translator {
         time_in_force: TimeInForce,
         qty: Qty,
     ) -> Vec<(Command, Vec<Event>)> {
-        let price_ok = u64::try_from(price).is_ok_and(|p| (1..=MAX_VALUE).contains(&p));
-        if !(1..=MAX_PIECES * MAX_ORDER_QTY).contains(&qty) || !price_ok {
+        if !placeable(price, qty) {
             self.divergence.skipped_commands += 1;
             return Vec::new();
         }
@@ -509,18 +538,67 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_shadow_fills_at_a_better_price_and_counts_it() {
+    fn a_buy_trade_cancels_stale_asks_below_its_price() {
         let mut t = Translator::new();
         t.on_snapshot(&snap(1, &[], &[(100, 5), (101, 5)]));
-        t.on_trade(&trade(2, TradeSide::B, 101, 3));
-        assert_eq!(levels_of(&t, Side::Sell), [(100, 2), (101, 5)]);
+        let out = t.on_trade(&trade(2, TradeSide::B, 101, 3));
+        assert!(out.iter().all(|&(ts, _)| ts == 2));
+        assert_eq!(commands(out), [cancel(1), ioc(3, Side::Buy, 101, 3)]);
+        assert_eq!(levels_of(&t, Side::Sell), [(101, 2)]);
         assert_eq!(
             t.divergence(),
             Divergence {
-                off_price_fill_qty: 3,
+                stale_orders_canceled: 1,
                 ..Divergence::default()
             }
         );
+    }
+
+    #[test]
+    fn a_sell_trade_cancels_stale_bids_above_its_price() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(100, 5), (99, 5)], &[]));
+        let out = t.on_trade(&trade(2, TradeSide::A, 99, 3));
+        assert_eq!(commands(out), [cancel(2), ioc(3, Side::Sell, 99, 3)]);
+        assert_eq!(levels_of(&t, Side::Buy), [(99, 2)]);
+        assert_eq!(t.divergence().stale_orders_canceled, 1);
+        assert_eq!(t.divergence().unfilled_taker_qty, 0);
+    }
+
+    #[test]
+    fn every_stale_level_is_canceled_best_price_first() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[], &[(100, 5), (101, 5), (102, 5)]));
+        let out = commands(t.on_trade(&trade(2, TradeSide::B, 102, 3)));
+        assert_eq!(out, [cancel(1), cancel(2), ioc(4, Side::Buy, 102, 3)]);
+        assert_eq!(levels_of(&t, Side::Sell), [(102, 2)]);
+        assert_eq!(t.divergence().stale_orders_canceled, 2);
+    }
+
+    #[test]
+    fn an_unplaceable_trade_emits_nothing_even_with_stale_orders_resting() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(101, 5)], &[]));
+        // Both sell trades would find the bid at 101 above their price.
+        assert!(t.on_trade(&trade(2, TradeSide::A, 100, 0)).is_empty());
+        assert!(t.on_trade(&trade(3, TradeSide::A, 0, 1)).is_empty());
+        assert_eq!(levels_of(&t, Side::Buy), [(101, 5)]);
+        assert_eq!(
+            t.divergence(),
+            Divergence {
+                skipped_commands: 2,
+                ..Divergence::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_trade_at_the_touch_cancels_nothing() {
+        let mut t = Translator::new();
+        t.on_snapshot(&snap(1, &[(99, 5)], &[(100, 5), (101, 5)]));
+        let out = commands(t.on_trade(&trade(2, TradeSide::B, 100, 3)));
+        assert_eq!(out, [ioc(4, Side::Buy, 100, 3)]);
+        assert_eq!(t.divergence(), Divergence::default());
     }
 
     #[test]
@@ -565,13 +643,14 @@ mod tests {
         assert_eq!(
             t.on_trade(&trade(5, TradeSide::A, 100, MAX_ORDER_QTY + 1))
                 .len(),
-            2
+            3,
+            "a cancel of the stale bid above the trade and two immediate orders"
         );
         assert!(t.on_trade(&trade(6, TradeSide::A, 100, 0)).is_empty());
         assert!(t.on_trade(&trade(6, TradeSide::A, 0, 1)).is_empty());
         assert_eq!(t.divergence().skipped_commands, 4);
-        assert_eq!(t.divergence().unfilled_taker_qty, 0);
-        assert_eq!(t.divergence().off_price_fill_qty, 1);
+        assert_eq!(t.divergence().unfilled_taker_qty, 1);
+        assert_eq!(t.divergence().stale_orders_canceled, 1);
         assert_eq!(
             t.on_snapshot(&snap(7, &[(100, MAX_ORDER_QTY), (max_price, 1)], &[]))
                 .len(),

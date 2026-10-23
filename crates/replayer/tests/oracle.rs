@@ -290,7 +290,8 @@ fn replace_window(bids: &mut Levels, asks: &mut Levels, top_bids: &Levels, top_a
 /// after it): a full snapshot replaces both sides, a top snapshot or a best
 /// bid and offer (one level per side) replaces only the price window it spans
 /// on each side (an empty side changes nothing), and a trade takes its size off the
-/// level at its price on the side it hit. Events before the first full
+/// level at its price on the side it hit, after removing the levels on that
+/// side that lie at a better price than the trade's. Events before the first full
 /// snapshot are ignored, as the replay drops them.
 fn expected_final_book(text: &str) -> (Levels, Levels) {
     enum Event {
@@ -324,10 +325,15 @@ fn expected_final_book(text: &str) -> (Levels, Levels) {
                 replace_window(&mut bids, &mut asks, &one(bbo.bid), &one(bbo.ask));
             }
             Event::Trade(trade) if started => {
-                // A buy takes liquidity from the asks, a sell from the bids.
+                // A buy takes liquidity from the asks, a sell from the bids. The
+                // source printed the trade at its price, so nothing rested at
+                // a better one on that side: those levels are stale and go
+                // first.
                 let side = if trade.side == "B" {
+                    asks.retain(|&price, _| price >= trade.price);
                     &mut asks
                 } else {
+                    bids.retain(|&price, _| price <= trade.price);
                     &mut bids
                 };
                 let left = side
@@ -496,5 +502,35 @@ async fn a_trade_outside_a_later_top_window_stays_in_the_book() {
     assert_eq!(bids.get(&100), Some(&60_000));
     assert_eq!(asks.get(&111), Some(&50_000));
     assert_eq!(asks.keys().next(), Some(&111));
+    check_feed_end(&text).await;
+}
+
+/// A full snapshot with bids 81 to 100 and asks 101 to 120 (1 lot each), then
+/// a buy of 0.5 at 105, which shows that asks 101 to 104 no longer rest.
+fn trade_passing_stale_asks() -> String {
+    let levels = |prices: Vec<u32>| {
+        let levels: Vec<String> = prices
+            .into_iter()
+            .map(|price| format!(r#"{{"n":1,"px":"{price}.0","sz":"1.0"}}"#))
+            .collect();
+        levels.join(",")
+    };
+    let book = format!(
+        r#"{{"channel":"l2Book","data":{{"coin":"BTC","time":1000,"levels":[[{}],[{}]]}}}}"#,
+        levels((81..=100).rev().collect()),
+        levels((101..=120).collect())
+    );
+    let trade = r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"105.0","sz":"0.5","time":1100,"hash":"0x00","tid":1}]}"#;
+    format!("{book}\n{trade}\n")
+}
+
+#[tokio::test]
+async fn a_trade_removes_the_stale_levels_it_passes() {
+    let text = trade_passing_stale_asks();
+    let (bids, asks) = expected_final_book(&text);
+    assert_eq!(bids.len(), 20);
+    assert_eq!(asks.keys().next(), Some(&105));
+    assert_eq!(asks.get(&105), Some(&50_000));
+    assert_eq!(asks.len(), 16);
     check_feed_end(&text).await;
 }
