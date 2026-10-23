@@ -1,22 +1,24 @@
 //! Loads a recorded Hyperliquid session as commands and paces them into steps
 //! for the service.
 
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
-use std::iter::{self, Peekable};
+use std::collections::BTreeSet;
+use std::iter;
 use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
-use std::vec::IntoIter;
 
 use engine::Step;
 use hyperliquid_adapter::{
-    BookSnapshot, ConvertError, Divergence, Grouping, L2Decoder, L2Error, MergeError, Message,
-    Trade, Translator, merge,
+    BookSnapshot, ConvertError, Divergence, Grouping, L2Error, MergeError, Message, Trade,
+    Translator, WireL2,
 };
 use protocol::{Command, MarketInfo, Ts};
 use tracing::info;
+
+mod l2_flow;
+
+pub use l2_flow::{L2Flow, L2Stats};
 
 /// How fast recorded order flow is played.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +222,10 @@ pub struct Loaded {
     /// which were left out because no push comes to release them. Always 0
     /// without `l2` lines.
     pub dropped_late_trades: usize,
+    /// Trades that were written after the push they belong to had already
+    /// been replayed, and were held to the next push instead. Always 0
+    /// without `l2` lines.
+    pub late_trades: usize,
     /// Top-of-book snapshots, best bid and offer messages included, before
     /// the first full snapshot, which were left out.
     pub dropped_top_snapshots: usize,
@@ -337,6 +343,64 @@ fn grouping_of(text: &str) -> Option<Grouping> {
     (c == "BTC" && grouping.is_offered()).then_some(grouping)
 }
 
+/// What a line is, as far as its header can tell.
+enum Classified {
+    /// Blank, or a subscription acknowledgement or `pong`: nothing to load.
+    Skip,
+    /// The last line of a recording still being written, cut off.
+    Cut,
+    /// An `error` line, which the source sends for a request it refused.
+    ErrorLine,
+    /// A line that holds data, or fails to load.
+    Feed(Feed),
+}
+
+/// Reads one line's header. `may_be_cut` is whether the line may be the cut-off
+/// end of a recording, which is left out when it does not parse.
+fn classify(number: usize, text: &str, may_be_cut: bool) -> Classified {
+    if text.trim().is_empty() {
+        return Classified::Skip;
+    }
+    let failed = |error| Classified::Feed(Feed::Failed(error));
+    let channel = match serde_json::from_str::<LineHeader>(text) {
+        Ok(_) if !text.trim_start().starts_with('{') => {
+            // The header struct also reads a JSON array, whose first
+            // element would pass for a channel.
+            let channel = "(none)".to_owned();
+            return failed(LoadError::Channel {
+                line: number,
+                channel,
+            });
+        }
+        Ok(header) => header.channel,
+        Err(_) if may_be_cut => return Classified::Cut,
+        Err(source) => {
+            return failed(LoadError::Parse {
+                line: number,
+                source,
+            });
+        }
+    };
+    Classified::Feed(match channel.as_deref() {
+        Some("subscriptionResponse" | "pong") => return Classified::Skip,
+        Some("error") => return Classified::ErrorLine,
+        Some("l2Book") => Feed::L2Book,
+        Some("bbo") => Feed::Bbo,
+        Some("trades") => Feed::Trades,
+        Some("l2") => match grouping_of(text) {
+            Some(grouping) => Feed::L2(grouping),
+            None => Feed::Failed(LoadError::Subscription { line: number }),
+        },
+        other => {
+            let channel = other.unwrap_or("(none)").to_owned();
+            Feed::Failed(LoadError::Channel {
+                line: number,
+                channel,
+            })
+        }
+    })
+}
+
 /// Reads every line's header, so the kind of recording is known before any
 /// line is converted.
 fn scan(recording: &str) -> Scan<'_> {
@@ -348,65 +412,12 @@ fn scan(recording: &str) -> Scan<'_> {
     };
     for (index, text) in recording.lines().enumerate() {
         let number = index + 1;
-        if text.trim().is_empty() {
-            continue;
+        match classify(number, text, Some(number) == unfinished_line) {
+            Classified::Skip => {}
+            Classified::Cut => scan.incomplete_last_line = true,
+            Classified::ErrorLine => scan.skipped_error_lines += 1,
+            Classified::Feed(feed) => scan.lines.push(Line { number, text, feed }),
         }
-        let failed = |error| Line {
-            number,
-            text,
-            feed: Feed::Failed(error),
-        };
-        let channel = match serde_json::from_str::<LineHeader>(text) {
-            Ok(_) if !text.trim_start().starts_with('{') => {
-                // The header struct also reads a JSON array, whose first
-                // element would pass for a channel.
-                let channel = "(none)".to_owned();
-                scan.lines.push(failed(LoadError::Channel {
-                    line: number,
-                    channel,
-                }));
-                continue;
-            }
-            Ok(header) => header.channel,
-            Err(_) if Some(number) == unfinished_line => {
-                scan.incomplete_last_line = true;
-                continue;
-            }
-            Err(source) => {
-                scan.lines.push(failed(LoadError::Parse {
-                    line: number,
-                    source,
-                }));
-                continue;
-            }
-        };
-        let feed = match channel.as_deref() {
-            Some("subscriptionResponse" | "pong") => continue,
-            Some("error") => {
-                scan.skipped_error_lines += 1;
-                continue;
-            }
-            Some("l2Book") => Feed::L2Book,
-            Some("bbo") => Feed::Bbo,
-            Some("trades") => Feed::Trades,
-            Some("l2") => match grouping_of(text) {
-                Some(grouping) => Feed::L2(grouping),
-                None => {
-                    let error = LoadError::Subscription { line: number };
-                    scan.lines.push(failed(error));
-                    continue;
-                }
-            },
-            other => {
-                let channel = other.unwrap_or("(none)").to_owned();
-                scan.lines.push(failed(LoadError::Channel {
-                    line: number,
-                    channel,
-                }));
-                continue;
-            }
-        };
-        scan.lines.push(Line { number, text, feed });
     }
     scan
 }
@@ -446,7 +457,11 @@ fn mismatch(line: usize) -> LoadError {
 /// the book changes only at pushes, as in the source's web app. Trades at or
 /// before the first push that merges are the backlog sent on subscribing and
 /// are counted in `dropped_trades`; trades after the last one are dropped and
-/// counted in `dropped_late_trades`.
+/// counted in `dropped_late_trades`. A trade written after the push it belongs
+/// to was already replayed (lines come in the order they were written, and a
+/// trade can trail its push) goes to the next push instead and is counted in
+/// `late_trades`. The assembly is [`L2Flow`], which takes the lines one at a
+/// time.
 ///
 /// Lines arrive roughly but not strictly in time order, since each grouping
 /// has its own connection. A push is therefore replayed once every grouping
@@ -575,79 +590,12 @@ fn load_documented(scan: Scan<'_>, market: &MarketInfo) -> Result<Loaded, LoadEr
     })
 }
 
-/// The books the groupings sent at one push time.
-type Push = BTreeMap<Grouping, BookSnapshot>;
-
-/// The replay of the `l2` feed, push by push in time order.
-struct PushReplay {
-    translator: Translator,
-    commands: Vec<(Ts, Command)>,
-    /// Trades in time order that no push has released yet.
-    trades: Peekable<IntoIter<Trade>>,
-    /// Groupings in the recording, which a complete push has all of.
-    groupings: usize,
-    started: bool,
-    /// The latest push time replayed or left out.
-    done_through: Option<Ts>,
-    dropped_trades: usize,
-    startup_pushes: usize,
-    skipped_pushes: usize,
-    trailing_pushes: usize,
-    failed_merges: usize,
-    first_merge_error: Option<(Ts, MergeError)>,
-    conflicting_qty: u64,
-}
-
-impl PushReplay {
-    /// Replays or leaves out the push at `ts`. `all_started` is the time at
-    /// which the last grouping sent its first book, and `open` whether the
-    /// recording ended before the push was settled.
-    fn push(&mut self, ts: Ts, push: &Push, all_started: Ts, open: bool) {
-        self.done_through = Some(ts);
-        if push.len() < self.groupings {
-            if ts < all_started {
-                self.startup_pushes += 1;
-            } else if open {
-                self.trailing_pushes += 1;
-            } else {
-                self.skipped_pushes += 1;
-            }
-            return;
-        }
-        let inputs: Vec<(Grouping, &BookSnapshot)> = push
-            .iter()
-            .map(|(&grouping, book)| (grouping, book))
-            .collect();
-        let merged = match merge(&inputs) {
-            Ok(merged) => merged,
-            Err(error) => {
-                self.failed_merges += 1;
-                self.first_merge_error.get_or_insert((ts, error));
-                return;
-            }
-        };
-        self.conflicting_qty += merged.conflicting_qty;
-        if self.started {
-            while let Some(trade) = self.trades.next_if(|trade| trade.ts <= ts) {
-                let held = Trade { ts, ..trade };
-                self.commands.extend(self.translator.on_trade(&held));
-            }
-        } else {
-            self.started = true;
-            while self.trades.next_if(|trade| trade.ts <= ts).is_some() {
-                self.dropped_trades += 1;
-            }
-        }
-        self.commands
-            .extend(self.translator.on_snapshot(&merged.book));
-    }
-}
-
 /// Loads a recording from the `l2` feed.
 fn load_l2(scan: Scan<'_>, market: &MarketInfo) -> Result<Loaded, LoadError> {
     let mut skipped_book_lines = 0;
-    let mut trades = Vec::new();
-    let mut l2_lines = Vec::new();
+    // Everything that can be wrong with a line on its own is found before any
+    // book is applied, so those errors come out in line order.
+    let mut items = Vec::new();
     let mut groupings = BTreeSet::new();
     for Line {
         number: line,
@@ -662,98 +610,58 @@ fn load_l2(scan: Scan<'_>, market: &MarketInfo) -> Result<Loaded, LoadError> {
                 let Message::Trades(wires) = message(line, text)? else {
                     return Err(mismatch(line));
                 };
+                let mut trades = Vec::with_capacity(wires.len());
                 for wire in &wires {
                     let convert = |source| LoadError::Convert { line, source };
                     trades.push(wire.to_trade(market).map_err(convert)?);
                 }
+                items.push(Item::Trades(trades));
             }
             Feed::L2(grouping) => {
                 let Message::L2(wire) = message(line, text)? else {
                     return Err(mismatch(line));
                 };
                 groupings.insert(grouping);
-                l2_lines.push((line, grouping, wire));
+                items.push(Item::Book(line, grouping, Box::new(wire)));
             }
         }
     }
-    trades.sort_by_key(|trade| trade.ts);
-    let mut replay = PushReplay {
-        translator: Translator::new(),
-        commands: Vec::new(),
-        trades: trades.into_iter().peekable(),
-        groupings: groupings.len(),
-        started: false,
-        done_through: None,
-        dropped_trades: 0,
-        startup_pushes: 0,
-        skipped_pushes: 0,
-        trailing_pushes: 0,
-        failed_merges: 0,
-        first_merge_error: None,
-        conflicting_qty: 0,
-    };
-    let mut decoders: BTreeMap<Grouping, L2Decoder> = BTreeMap::new();
-    // Each grouping's latest book time, and when the last grouping started.
-    let mut latest: BTreeMap<Grouping, Ts> = BTreeMap::new();
-    let mut all_started: Ts = 0;
-    let mut pending: BTreeMap<Ts, Push> = BTreeMap::new();
-    for (line, grouping, wire) in l2_lines {
-        let book = decoders
-            .entry(grouping)
-            .or_default()
-            .apply(&wire, market)
-            .map_err(|source| LoadError::L2 { line, source })?;
-        let ts = book.ts;
-        if replay.done_through.is_some_and(|done| ts <= done) {
-            return Err(LoadError::Backwards { line });
-        }
-        pending
-            .entry(ts)
-            .or_default()
-            .insert(grouping, book.clone());
-        match latest.entry(grouping) {
-            Entry::Vacant(entry) => {
-                all_started = all_started.max(ts);
-                entry.insert(ts);
-            }
-            Entry::Occupied(mut entry) => {
-                entry.insert(ts.max(*entry.get()));
-            }
-        }
-        // Every grouping has sent a book after the pushes before the earliest
-        // of the latest ones, so none of them can still complete.
-        if latest.len() == groupings.len() {
-            let settled = latest.values().min().copied().unwrap_or(0);
-            while let Some(entry) = pending.first_entry()
-                && *entry.key() < settled
-            {
-                let (ts, push) = entry.remove_entry();
-                replay.push(ts, &push, all_started, false);
-            }
+    let mut flow = L2Flow::new(market.clone(), groupings.len());
+    let mut commands = Vec::new();
+    for item in items {
+        match item {
+            Item::Trades(trades) => flow.trades(trades),
+            Item::Book(line, grouping, wire) => commands.extend(flow.book(line, grouping, &wire)?),
         }
     }
-    for (ts, push) in pending {
-        replay.push(ts, &push, all_started, true);
-    }
-    if !replay.started {
+    let (rest, stats) = flow.finish();
+    commands.extend(rest);
+    if !stats.started {
         return Err(LoadError::NoSnapshot);
     }
     Ok(Loaded {
-        divergence: replay.translator.divergence(),
-        commands: replay.commands,
-        dropped_trades: replay.dropped_trades,
-        dropped_late_trades: replay.trades.count(),
+        divergence: stats.divergence,
+        commands,
+        dropped_trades: stats.dropped_trades,
+        dropped_late_trades: stats.dropped_late_trades,
+        late_trades: stats.late_trades,
         incomplete_last_line: scan.incomplete_last_line,
         skipped_book_lines,
-        startup_pushes: replay.startup_pushes,
-        skipped_pushes: replay.skipped_pushes,
-        trailing_pushes: replay.trailing_pushes,
-        failed_merges: replay.failed_merges,
-        first_merge_error: replay.first_merge_error,
-        conflicting_qty: replay.conflicting_qty,
+        startup_pushes: stats.startup_pushes,
+        skipped_pushes: stats.skipped_pushes,
+        trailing_pushes: stats.trailing_pushes,
+        failed_merges: stats.failed_merges,
+        first_merge_error: stats.first_merge_error,
+        conflicting_qty: stats.conflicting_qty,
         skipped_error_lines: scan.skipped_error_lines,
         ..Loaded::default()
     })
+}
+
+/// A line of an `l2` recording, read.
+enum Item {
+    Trades(Vec<Trade>),
+    Book(usize, Grouping, Box<WireL2>),
 }
 
 /// The channel of a recorded line. The line itself is parsed as written by
@@ -780,6 +688,8 @@ pub fn long_waits(commands: &[(Ts, Command)], limit: Duration) -> Vec<(usize, Du
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn flow(timestamps: &[Ts]) -> Vec<(Ts, Command)> {
@@ -1313,6 +1223,151 @@ mod tests {
         // The snapshot after the trade finds the ask already at 0.8.
         assert_eq!(loaded.divergence, Divergence::default());
         assert_eq!(book_after(&loaded).1, Levels::from([(81_001, 80_000)]));
+    }
+
+    /// Feeds `lines` to a flow of two groupings one at a time and returns the
+    /// commands each line made, then those of finishing, then the counts.
+    fn flow_run(lines: &[String]) -> (Vec<Vec<(Ts, Command)>>, L2Stats) {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        let mut per_line = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            per_line.push(flow.line(index + 1, line).expect("accepts the line"));
+        }
+        let (rest, stats) = flow.finish();
+        per_line.push(rest);
+        (per_line, stats)
+    }
+
+    fn after(commands: Vec<(Ts, Command)>) -> (Levels, Levels) {
+        book_after(&Loaded {
+            commands,
+            ..Loaded::default()
+        })
+    }
+
+    #[test]
+    fn a_flow_emits_a_push_once_every_grouping_has_sent_a_later_book() {
+        // The ask shrinks at every push, so that each push makes commands.
+        let lines: Vec<String> = [(1_000, "1.0"), (2_000, "0.9"), (3_000, "0.8")]
+            .into_iter()
+            .flat_map(|(time, ask)| both(time, ask))
+            .collect();
+        let (per_line, _) = flow_run(&lines);
+        let made: Vec<bool> = per_line
+            .iter()
+            .map(|commands| !commands.is_empty())
+            .collect();
+        // Push 1,000 is settled by the second book at 2,000, push 2,000 by
+        // the second book at 3,000, and push 3,000 only by the end.
+        assert_eq!(made, [false, false, false, true, false, true, true]);
+        let all: Vec<(Ts, Command)> = per_line.concat();
+        assert_eq!(all, load_lines(&lines).expect("loads").commands);
+    }
+
+    #[test]
+    fn a_trade_that_arrives_after_its_push_was_released_goes_to_the_next_push() {
+        let mut lines: Vec<String> = [1_000, 2_000, 3_000]
+            .into_iter()
+            .flat_map(|time| both(time, "1.0"))
+            .collect();
+        // Written after the second book at 3,000, which released push 2,000,
+        // although its time is before that push.
+        lines.push(trade_line(1_500, "B", 81_001));
+        lines.extend(both(4_000, "1.0"));
+        let (per_line, stats) = flow_run(&lines);
+        assert_eq!(stats.late_trades, 1);
+        assert_eq!(stats.dropped_late_trades, 0);
+        let all: Vec<(Ts, Command)> = per_line.concat();
+        let first_at_3_000 = all
+            .iter()
+            .position(|&(ts, _)| ts == 3_000_000)
+            .expect("a command at push 3,000");
+        assert!(is_ioc(&all[first_at_3_000].1));
+        assert!(!all.iter().any(|&(ts, _)| ts == 1_500_000));
+        let loaded = load_lines(&lines).expect("loads");
+        assert_eq!(loaded.late_trades, 1);
+        assert_eq!(loaded.commands, all);
+    }
+
+    #[test]
+    fn a_trade_written_before_its_push_is_not_late() {
+        let mut lines: Vec<String> = both(1_000, "1.0").to_vec();
+        lines.push(trade_line(1_500, "B", 81_001));
+        lines.extend(both(2_000, "1.0"));
+        lines.extend(both(3_000, "1.0"));
+        let (_, stats) = flow_run(&lines);
+        assert_eq!(stats.late_trades, 0);
+    }
+
+    #[test]
+    fn a_reset_keeps_the_engines_book_and_starts_the_connections_over() {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        let mut commands = Vec::new();
+        let mut number = 0;
+        let mut feed = |flow: &mut L2Flow, lines: &[String]| {
+            let mut made = Vec::new();
+            for line in lines {
+                number += 1;
+                made.extend(flow.line(number, line).expect("accepts the line"));
+            }
+            made
+        };
+        let first: Vec<String> = [1_000, 2_000]
+            .into_iter()
+            .flat_map(|time| both(time, "1.0"))
+            .collect();
+        commands.extend(feed(&mut flow, &first));
+        flow.reset_connection();
+        // The new connections start with the backlog of trades, which is
+        // dropped, and with a book that has moved on.
+        let second: Vec<String> = [trade_line(1_500, "B", 81_001)]
+            .into_iter()
+            .chain(both(5_000, "0.8"))
+            .chain(both(6_000, "0.8"))
+            .collect();
+        commands.extend(feed(&mut flow, &second));
+        let (rest, stats) = flow.finish();
+        commands.extend(rest);
+        assert_eq!(stats.dropped_trades, 1);
+        assert_eq!(stats.late_trades, 0);
+        assert_eq!(stats.divergence, Divergence::default());
+        // One order per level: the second connection's first push replaced
+        // the first connection's book instead of adding to it.
+        assert_eq!(
+            after(commands),
+            (
+                Levels::from([(81_000, 100_000), (80_999, 200_000)]),
+                Levels::from([(81_001, 80_000)])
+            )
+        );
+    }
+
+    #[test]
+    fn a_reset_forgets_the_pushes_still_open() {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        // Only the fine grouping has sent push 2,000 when the connections
+        // are lost.
+        for (number, line) in [fine(1_000, "1.0"), coarse(1_000, "1.0"), fine(2_000, "1.0")]
+            .iter()
+            .enumerate()
+        {
+            flow.line(number + 1, line).expect("accepts the line");
+        }
+        flow.reset_connection();
+        for (number, line) in both(3_000, "1.0")
+            .iter()
+            .chain(&both(4_000, "1.0"))
+            .enumerate()
+        {
+            flow.line(number + 10, line).expect("accepts the line");
+        }
+        let (_, stats) = flow.finish();
+        // The half push at 2,000 was forgotten, so it is counted as nothing
+        // (kept, it would be a start-up push of the new connections).
+        assert_eq!(stats.startup_pushes, 0);
+        assert_eq!(stats.skipped_pushes, 0);
+        assert_eq!(stats.trailing_pushes, 0);
+        assert_eq!(stats.failed_merges, 0);
     }
 
     #[test]

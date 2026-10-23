@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         dropped_top_snapshots = loaded.dropped_top_snapshots,
         skipped_bbos = loaded.skipped_bbos,
         dropped_late_trades = loaded.dropped_late_trades,
+        late_trades = loaded.late_trades,
         skipped_book_lines = loaded.skipped_book_lines,
         startup_pushes = loaded.startup_pushes,
         skipped_pushes = loaded.skipped_pushes,
