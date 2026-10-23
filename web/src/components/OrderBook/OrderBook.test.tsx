@@ -1,11 +1,21 @@
 import { act, render, screen, within } from "@testing-library/react";
-import { StrictMode } from "react";
+import userEvent from "@testing-library/user-event";
+import { type ComponentProps, StrictMode, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMessage, type BookState } from "../../feed/book";
 import type { LastTrade } from "../../feed/log";
 import { level, market, snapshot } from "../../test/fixtures";
 import { stubViewport } from "../../test/layout";
-import { OrderBook } from "./OrderBook";
+import { OrderBook as Panel } from "./OrderBook";
+
+// The panel takes its width choice from the app; this keeps it in state the
+// way the app does.
+function OrderBook(
+  props: Omit<ComponentProps<typeof Panel>, "width" | "onWidthChange">,
+) {
+  const [width, setWidth] = useState<number | null>(null);
+  return <Panel {...props} width={width} onWidthChange={setWidth} />;
+}
 
 function bookOf(message: ReturnType<typeof snapshot>): BookState {
   const result = applyMessage(null, message);
@@ -325,6 +335,240 @@ describe("OrderBook", () => {
       expect(steps("Bids")).toEqual([null]);
       rerender(view(run([998], [1_001, 1_002])));
       expect(steps("Bids")).toEqual([null]);
+    });
+  });
+
+  describe("grouping", () => {
+    // Whole-dollar ticks, so a width of 1,000 ticks reads as "1,000".
+    const whole = { ...market, price_decimals: 0 };
+    const view = (book: BookState) => (
+      <OrderBook book={book} market={whole} lastTrade={null} />
+    );
+    const menu = () => screen.getByRole("combobox", { name: "Group prices" });
+    const options = () =>
+      within(menu())
+        .getAllByRole("option")
+        .map((option) => option.textContent);
+    const priced = (bids: [number, number][], asks: [number, number][]) =>
+      bookOf(
+        snapshot({
+          bids: bids.map(([p, q]) => level(p, q)),
+          asks: asks.map(([p, q]) => level(p, q)),
+        }),
+      );
+    const fiveDigits = () =>
+      priced(
+        [
+          [10_007, 1_000],
+          [10_003, 2_000],
+          [9_995, 3_000],
+        ],
+        [
+          [10_011, 1_000],
+          [10_014, 2_000],
+          [10_021, 5_000],
+        ],
+      );
+    const rows = (name: string) =>
+      within(screen.getByRole("rowgroup", { name }))
+        .getAllByRole("row")
+        .map((r) => cells(r));
+    const flashing = () =>
+      screen
+        .getAllByRole("row")
+        .filter(
+          (row) => row.style.getPropertyValue("--flash-step-index") !== "",
+        ).length;
+
+    it("offers the widths of a five-digit price, finest selected", () => {
+      render(view(fiveDigits()));
+      expect(options()).toEqual(["1", "2", "5", "10", "100", "1,000"]);
+      expect(menu()).toHaveValue("1");
+    });
+
+    it("offers no grouping first for a six-digit price", () => {
+      render(view(priced([[100_000, 1_000]], [[100_005, 1_000]])));
+      expect(options()).toEqual([
+        "1",
+        "10",
+        "20",
+        "50",
+        "100",
+        "1,000",
+        "10,000",
+      ]);
+    });
+
+    it("sizes the choices from the best ask when there are no bids", () => {
+      render(view(priced([], [[10_011, 1_000]])));
+      expect(options()).toEqual(["1", "2", "5", "10", "100", "1,000"]);
+    });
+
+    it("keeps five-digit choices for a lone ask touching a power of ten", () => {
+      render(view(priced([], [[100_000, 1_000]])));
+      expect(options()).toEqual(["1", "2", "5", "10", "100", "1,000"]);
+    });
+
+    it("is disabled when there is only one choice", () => {
+      render(view(priced([[5, 1_000]], [[7, 1_000]])));
+      expect(options()).toEqual(["1"]);
+      expect(menu()).toBeDisabled();
+    });
+
+    it("rounds bids down and asks up and totals the grouped rows", async () => {
+      const user = userEvent.setup();
+      render(view(fiveDigits()));
+      await user.selectOptions(menu(), "10");
+      expect(rows("Bids")).toEqual([
+        ["10,000", "3.000", "3.000"],
+        ["9,990", "3.000", "6.000"],
+      ]);
+      // Furthest first, like the ungrouped asks.
+      expect(rows("Asks")).toEqual([
+        ["10,030", "5.000", "8.000"],
+        ["10,020", "3.000", "3.000"],
+      ]);
+    });
+
+    it("keeps showing the raw spread and percentage of the ungrouped book", async () => {
+      const user = userEvent.setup();
+      render(view(fiveDigits()));
+      await user.selectOptions(menu(), "10");
+      const bar = within(screen.getByRole("rowgroup", { name: "Spread" }));
+      // 4 ticks over a mid of 10,009; grouped it would be 20 over 10,010.
+      expect(bar.getByText("4")).toBeInTheDocument();
+      expect(bar.getByText("0.040%")).toBeInTheDocument();
+    });
+
+    it("is reachable with the keyboard", async () => {
+      const user = userEvent.setup();
+      render(view(fiveDigits()));
+      await user.tab();
+      expect(menu()).toHaveFocus();
+    });
+
+    describe("when the price changes its number of digits", () => {
+      const five = () =>
+        priced(
+          [
+            [99_999, 1_000],
+            [99_990, 1_000],
+          ],
+          [[100_020, 1_000]],
+        );
+      const six = () =>
+        priced(
+          [
+            [100_000, 1_000],
+            [99_995, 1_000],
+          ],
+          [[100_020, 1_000]],
+        );
+      const sixCrossed = () =>
+        priced(
+          [
+            [100_000, 1_000],
+            [99_999, 1_000],
+            [99_990, 1_000],
+          ],
+          [[100_020, 1_000]],
+        );
+
+      it("keeps a chosen width that is no longer offered, in order", async () => {
+        const user = userEvent.setup();
+        const { rerender } = render(view(five()));
+        await user.selectOptions(menu(), "5");
+
+        rerender(view(six()));
+        expect(options()).toEqual([
+          "1",
+          "5",
+          "10",
+          "20",
+          "50",
+          "100",
+          "1,000",
+          "10,000",
+        ]);
+        expect(menu()).toHaveValue("5");
+        expect(rows("Bids").map((r) => r[0])).toEqual(["100,000", "99,995"]);
+
+        rerender(view(five()));
+        expect(options()).toEqual(["1", "2", "5", "10", "100", "1,000"]);
+        expect(menu()).toHaveValue("5");
+      });
+
+      it("holds the offered widths still while the menu has focus", async () => {
+        const user = userEvent.setup();
+        const { rerender } = render(view(five()));
+        await user.tab();
+        expect(menu()).toHaveFocus();
+
+        rerender(view(six()));
+        expect(options()).toEqual(["1", "2", "5", "10", "100", "1,000"]);
+
+        await user.tab();
+        expect(options()).toEqual([
+          "1",
+          "10",
+          "20",
+          "50",
+          "100",
+          "1,000",
+          "10,000",
+        ]);
+      });
+
+      it("keeps the grouping and the flash across the crossing, both ways", async () => {
+        const user = userEvent.setup();
+        const { rerender } = render(view(five()));
+        await user.selectOptions(menu(), "5");
+
+        // Only the new best bid lights up; the buckets below it were there.
+        rerender(view(sixCrossed()));
+        expect(rows("Bids").map((r) => r[0])).toEqual([
+          "100,000",
+          "99,995",
+          "99,990",
+        ]);
+        expect(flashing()).toBe(1);
+
+        rerender(view(five()));
+        expect(flashing()).toBe(0);
+        rerender(
+          view(
+            priced(
+              [
+                [99_999, 1_000],
+                [99_990, 1_000],
+                [99_985, 1_000],
+              ],
+              [[100_020, 1_000]],
+            ),
+          ),
+        );
+        expect(flashing()).toBe(1);
+      });
+    });
+
+    it("does not flash the book that follows a grouping change", async () => {
+      const user = userEvent.setup();
+      const { rerender } = render(view(fiveDigits()));
+      await user.selectOptions(menu(), "10");
+      expect(flashing()).toBe(0);
+
+      rerender(
+        view(
+          priced(
+            [
+              [10_007, 1_000],
+              [9_975, 1_000],
+            ],
+            [[10_011, 1_000]],
+          ),
+        ),
+      );
+      expect(flashing()).toBe(1);
     });
   });
 

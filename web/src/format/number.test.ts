@@ -34,6 +34,15 @@ describe("formatSpreadPercent", () => {
     expect(formatSpreadPercent(99_999, 100_000)).toBe("0.001%");
     expect(formatSpreadPercent(1_000_000, 1_000_050)).toBe("0.005%");
   });
+
+  it("never shows less than 0.001%", () => {
+    expect(formatSpreadPercent(1_000_000, 1_000_001)).toBe("0.001%");
+  });
+
+  it("shows a locked book as zero and a crossed one as negative", () => {
+    expect(formatSpreadPercent(100_000, 100_000)).toBe("0.000%");
+    expect(formatSpreadPercent(100_010, 100_000)).toBe("-0.010%");
+  });
 });
 
 describe("formatClock", () => {

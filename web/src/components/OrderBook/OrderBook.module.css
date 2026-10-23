@@ -3,6 +3,7 @@
    same place however deep the book is. The top padding keeps it below the
    connection status line, which is pinned to the top-left of the page. */
 .book {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -45,4 +46,10 @@
 
 .table td:first-child {
   text-align: left;
+}
+
+.waiting {
+  margin: 0;
+  text-align: center;
+  color: var(--color-text-faint);
 }

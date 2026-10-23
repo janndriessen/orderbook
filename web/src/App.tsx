@@ -9,14 +9,22 @@ import { useFeed } from "./feed/useFeed";
 export function App() {
   const { status, book, market, log, lastTrade, restarts } = useFeed();
   const [logOpen, setLogOpen] = useState(false);
+  // Held here, not in the book, which unmounts while the feed resyncs.
+  const [width, setWidth] = useState<number | null>(null);
 
   return (
     <div className={styles.layout} data-log-open={logOpen}>
       <ConnectionStatus status={status} />
       <main className={styles.bookPane}>
         <div className={styles.bookSlot}>
-          {book && market ? (
-            <OrderBook book={book} market={market} lastTrade={lastTrade} />
+          {market ? (
+            <OrderBook
+              book={book}
+              market={market}
+              lastTrade={lastTrade}
+              width={width}
+              onWidthChange={setWidth}
+            />
           ) : (
             <p className={styles.waiting}>Waiting for the feed</p>
           )}

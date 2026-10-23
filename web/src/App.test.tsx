@@ -1,8 +1,9 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { accepted, snapshot, trade } from "./test/fixtures";
+import { BACKOFF_BASE_MS } from "./feed/FeedHandler";
+import { accepted, snapshot, trade, update } from "./test/fixtures";
 import { stubViewport } from "./test/layout";
 
 class FakeWebSocket {
@@ -25,6 +26,8 @@ const deliver = (message: unknown) =>
   act(() => socket().onmessage?.({ data: JSON.stringify(message) }));
 
 describe("App", () => {
+  afterEach(() => vi.useRealTimers());
+
   beforeEach(() => {
     stubViewport(1_000);
     FakeWebSocket.instances = [];
@@ -102,5 +105,38 @@ describe("App", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Reconnecting");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Trades" })).toBeChecked();
+  });
+
+  it("keeps the price grouping and its menu through a resync", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    deliver(snapshot());
+    const menu = screen.getByRole("combobox", { name: "Group prices" });
+    await user.selectOptions(menu, "100");
+    act(() => menu.focus());
+
+    // An update that skips a sequence number drops the book and reconnects.
+    vi.useFakeTimers();
+    deliver(update({ seq: 9 }));
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    // The same element stays, idle but still focusable, so keyboard focus is
+    // not lost with the book; it ignores changes meanwhile.
+    expect(menu).toBeInTheDocument();
+    expect(menu).toHaveAttribute("aria-disabled", "true");
+    // A real `disabled` would drop focus in some browsers.
+    expect(menu).not.toBeDisabled();
+    expect(menu).toHaveFocus();
+    fireEvent.change(menu, { target: { value: "1" } });
+    expect(menu).toHaveValue("100");
+    // At the first attempt the backoff ceiling equals its base, so the retry
+    // comes after exactly that; waiting longer would let the unanswered fake
+    // socket time out and retry again.
+    act(() => vi.advanceTimersByTime(BACKOFF_BASE_MS));
+
+    deliver(snapshot({ seq: 20 }));
+    expect(screen.getByRole("combobox", { name: "Group prices" })).toBe(menu);
+    expect(menu).not.toHaveAttribute("aria-disabled");
+    expect(menu).toHaveFocus();
+    expect(menu).toHaveValue("100");
   });
 });

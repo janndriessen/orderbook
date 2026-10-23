@@ -23,7 +23,7 @@ The diagram shows the target design. Principles:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ui-layout-dark.svg">
-  <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the top right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half, with the toggle at the right end of its toolbar." src="docs/ui-layout-light.svg">
+  <img alt="Web UI layout. Left: the order book is centered with asks above bids, a price-grouping menu in the top right corner of the book and a toggle button at the top right. Right: with the flow log open, the screen splits into halves, the book and its grouping menu centered in the left half and the flow log centered in the right half, with the toggle at the right end of its toolbar." src="docs/ui-layout-light.svg">
 </picture>
 
 Desktop only, in the dense style of a professional exchange order book.
@@ -31,7 +31,8 @@ The book is a panel of up to 20 rows per side around a spread bar that stays put
 A side with fewer levels keeps its slots and leaves its far end blank.
 On a window too short for 20 rows per side, the panel shows as many as fit.
 Numbers and depth bars change at once, without easing.
-A price that was not anywhere in the previous book (visible or not) flashes in its side color, each row after its own short delay so a batch lights up in a scattered order. There is no flash for the first book or for a size change, and none under reduced motion, where the duration tokens shrink it to nothing.
+A price that was not anywhere in the previous book (visible or not) flashes in its side color, each row after its own short delay so a batch lights up in a scattered order. There is no flash for the first book, the book right after a grouping change or for a size change, and none under reduced motion, where the duration tokens shrink it to nothing.
+A menu at the top right of the book panel, above the Total column (labelled "Group prices"), sums levels into wider price buckets: bids round down and asks round up, and the finest width, one tick, is the default. The offered widths follow the number of digits of the best bid, or with no bids of the best ask minus one tick. A width the user picked stays until they pick another, even when the price drifts to a digit count that does not list it, and it survives a feed resync. The spread bar always shows the raw spread of the ungrouped book, as a percentage of the mid price with three decimals; a positive spread never shows below 0.001%, while a locked book shows 0.000% and a crossed one a negative value.
 The spread bar shows the last trade price with an arrow for the taker side, in the bid color for a buy and the ask color for a sell.
 A toggle opens the flow log beside it, with filtering and pause.
 The log is ready to show rejected orders and refused cancels and replaces; the random-walk order flow never provokes them.
@@ -89,7 +90,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - every other trade is translated at the time of the first complete push at or after its own time, before that push's snapshot, so the engine's book changes only at pushes, as the source's web app does
     - test: a recorded fixture of all six groupings (`crates/replayer/tests/l2.rs`) checks that after every complete push the matcher's book equals the merged book exactly and, grouped by each grouping's rule, gives that grouping's own book, and that every held trade became an order
   - [ ] Oracle test per grouping
-  - [ ] Web UI: rows filling the panel (up to 20), bars without easing, a flash on new price levels only, and a grouping menu
+  - [x] Web UI: rows filling the panel (up to 20), bars without easing, a flash on new price levels only, and a grouping menu
 - [ ] Deployment to a small Hetzner server
 
 ## Getting started
@@ -153,6 +154,7 @@ Planned, not yet present: `data/` (recorded sessions, gitignored).
 - **Sequence gaps:** a command whose sequence number is not the next one stops the engine with a panic, and the service with it. Production engines request missing input from the sequencer's journal on a gap and drop a repeated number as a duplicate, then carry on.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (100 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
+- **Price grouping:** the client receives the full-depth book and groups it itself. Production venues serve depth already aggregated per grouping, so a client never downloads levels it will not show.
 - **Level totals:** nothing bounds a level's total quantity, and above 2^53 lots the feed's integers are no longer exact. This is a workload assumption, not a property of the market: the service has no balance checks and the source is a derivatives market, so physical supply bounds nothing. Real BTC-USD levels stay many orders of magnitude below 2^53 lots, but synthetic flow could exceed it (about 90 million maximum-size orders at one price). The web client refuses such a message and can't show the book until the level shrinks. A production venue would cap open orders per account or publish sizes as decimal strings or binary integers.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
   - Synthetic benchmark, measured on an Apple M3 Max (release build, 2026-10-20): the matcher handles about 8.6 million fuzz commands per second (about 117 ns each); a cancel at the front of a level stays near 35 ns, while one in the middle costs about 250 ns with 1,000 orders at the price, 1.9 µs with 10,000 and 21 µs with 100,000.

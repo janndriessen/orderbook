@@ -1,0 +1,25 @@
+/* Sits in the band above the column headers, at the panel's right edge, where
+   the connection status line leaves room. Out of flow so the spread bar stays
+   centred whatever the menu does. */
+.select {
+  position: absolute;
+  top: var(--top-inset);
+  right: var(--space-4);
+  height: calc(var(--header-height) - var(--space-1));
+  padding: 0 var(--space-1);
+  color: var(--color-text-muted);
+  background: var(--color-raised);
+  border: var(--border-width) solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.select:focus-visible {
+  outline: var(--focus-width) solid var(--color-focus);
+}
+
+.select:disabled,
+.select[aria-disabled="true"] {
+  opacity: var(--disabled-opacity);
+}

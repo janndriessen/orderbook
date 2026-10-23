@@ -39,8 +39,13 @@ const percent = new Intl.NumberFormat(LOCALE, {
   maximumFractionDigits: 3,
 });
 
+/** The smallest spread shown, as a fraction of the mid price (0.001%). */
+const MIN_SPREAD_RATIO = 0.00001;
+
 /**
- * Spread as a percentage of the mid price, e.g. "0.001%".
+ * Spread as a percentage of the mid price, e.g. "0.001%". A positive spread
+ * is never shown below that, as a tighter one would read as zero; a locked or
+ * crossed book shows its true ratio.
  *
  * Both prices are in ticks, so the tick size cancels out of the ratio. The
  * result is for display only, which is why a float division is fine here.
@@ -49,7 +54,8 @@ export function formatSpreadPercent(
   bidTicks: number,
   askTicks: number,
 ): string {
-  return percent.format(((askTicks - bidTicks) * 2) / (bidTicks + askTicks));
+  const ratio = ((askTicks - bidTicks) * 2) / (bidTicks + askTicks);
+  return percent.format(ratio > 0 ? Math.max(ratio, MIN_SPREAD_RATIO) : ratio);
 }
 
 const clock = new Intl.DateTimeFormat(LOCALE, {
