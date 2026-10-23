@@ -75,6 +75,13 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] Step mode of the replayer: `REPLAY_SPEED=step` waits for Enter before each recorded moment
   - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (the standard and the fast feed), the best bid and offer, and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book, best bid and offer or trades message; acknowledgements, `pong` and `error` messages count as no progress
   - [x] Re-measure level lengths and cancel cost on replayed Hyperliquid data: real levels stay short, so levels remain a `VecDeque` (`levels` binary, results under the price-levels trade-off)
+- [ ] A book that works like Hyperliquid's own, at every price grouping
+  - [x] `hyperliquid-adapter`: `L2Decoder` for the `l2` feed that Hyperliquid's web app subscribes to (not in its API documentation): 20 levels per side about every 0.54 s, a full book on subscribing, then changes as base64 of a raw deflate stream of JSON that remove levels by index and set levels by price. Every resulting book is checked (strictly best first, at most 20 levels per side, no size of zero, best bid below best ask), and so is every change (a book to apply to, removed indices that exist once, each price set once per side, not older than its book, valid base64 and deflate, at most 1 MiB inflated, convertible values); any failed message drops the book until the next one, since a later change's indices would name the wrong levels. Replaying recorded changes gives exactly the book of a fresh subscription at the same push (`crates/adapters/hyperliquid/tests/l2.rs`)
+  - [ ] Recorder: one connection per price grouping (no message says which grouping it is for)
+  - [ ] Merge the six groupings into one book of $1 levels
+  - [ ] Replay: align the groupings by push time and hold trades until the next push
+  - [ ] Oracle test per grouping
+  - [ ] Web UI: rows filling the panel (up to 20), bars without easing, a flash on new price levels only, and a grouping menu
 - [ ] Deployment to a small Hetzner server
 
 ## Getting started
@@ -118,7 +125,7 @@ crates/matching/   order book, limit- and market-order matching, cancel and repl
 crates/engine/     order book service: random-walk order flow, gateway, matcher on its own thread, publisher, WebSocket feed
 crates/generator/  seeded fuzz order flow, adversarial yet within the gateway's bounds; depends only on protocol (plus rand and rand_chacha)
 crates/harness/    invariant checks and a naive reference matcher; its fuzz test runs generated flow through both matchers and compares their events exactly; depends on protocol and matching (plus generator in its tests)
-crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book` and `trades` message types, decimal strings to ticks and lots; depends on protocol and matching (plus serde and compile-time thiserror, and serde_json in its tests); `translate` turns snapshots and trades into commands
+crates/adapters/hyperliquid/  Hyperliquid adapter (library): `l2Book`, `l2`, `bbo` and `trades` message types, decimal strings to ticks and lots; `l2` keeps the book of the `l2` feed from its compressed changes; `translate` turns snapshots and trades into commands; depends on protocol and matching (plus serde, serde_json, base64, flate2 and compile-time thiserror)
 crates/adapters/hyperliquid-recorder/  `record` binary: records Hyperliquid's public BTC book and trades feed to a JSON Lines file; depends on tokio, tokio-tungstenite (rustls) and serde_json, not on the other crates
 crates/replayer/   loads a recording into commands and paces them for the service (real time, n times or maximum speed); the `replay` binary serves a recording through the engine; the `levels` binary measures level lengths and cancel cost on a recording. The library depends on engine, protocol, the Hyperliquid adapter, serde, serde_json, thiserror and tracing; the binaries add anyhow, matching, tokio and tracing-subscriber; its tests add futures-util and tokio-tungstenite
 web/               React frontend; src/protocol/ holds the generated TypeScript types

@@ -1,5 +1,6 @@
-//! WebSocket messages (`l2Book`, `bbo` and `trades` channels) and their conversion
-//! into integer form.
+//! WebSocket messages (`l2Book`, `l2`, `bbo` and `trades` channels) and their
+//! conversion into integer form. An `l2` message only makes sense in its
+//! stream, so the [`crate::L2Decoder`] converts those.
 //!
 //! The wire types mirror the JSON and keep numbers as the strings the source
 //! sends. The `users` field of a trade carries wallet addresses and is
@@ -11,6 +12,7 @@ use protocol::{MarketInfo, Price, Qty, Ts};
 use serde::Deserialize;
 
 use crate::decimal::{DecimalError, MAX_VALUE, parse_price, parse_qty};
+use crate::l2::WireL2;
 
 /// The Hyperliquid coin the BTC-USD market is built from.
 const COIN: &str = "BTC";
@@ -25,6 +27,8 @@ const COIN: &str = "BTC";
 pub enum Message {
     /// Full snapshot of the top levels of the book.
     L2Book(WireBook),
+    /// The book feed the source's web app uses: a full book, then changes.
+    L2(WireL2),
     /// Best bid and offer, sent whenever either changes.
     Bbo(WireBbo),
     /// Trades since the last message.
@@ -121,19 +125,21 @@ pub struct BookLevel {
     pub price: Price,
     /// Total size in lots.
     pub qty: Qty,
-    /// Number of orders at the level.
+    /// Number of orders at the level as the source reports it, or 0 where it
+    /// reports none: an `l2` change sends sizes without counts.
     pub orders: u64,
 }
 
-/// A book snapshot in integer form. Level order and shape are taken from the
-/// wire unchecked.
+/// A book snapshot in integer form. Converted from an `l2Book` or `bbo`
+/// message, its level order and shape are the wire's, unchecked; from the
+/// [`crate::L2Decoder`], they are checked, sides best first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookSnapshot {
     /// Snapshot time in microseconds.
     pub ts: Ts,
-    /// Bid levels as sent.
+    /// Bid levels, in the order the source gives them.
     pub bids: Vec<BookLevel>,
-    /// Ask levels as sent.
+    /// Ask levels, in the order the source gives them.
     pub asks: Vec<BookLevel>,
 }
 
@@ -152,7 +158,7 @@ pub struct Trade {
     pub tid: u64,
 }
 
-fn check_coin(coin: &str) -> Result<(), ConvertError> {
+pub(crate) fn check_coin(coin: &str) -> Result<(), ConvertError> {
     if coin == COIN {
         Ok(())
     } else {
@@ -160,7 +166,16 @@ fn check_coin(coin: &str) -> Result<(), ConvertError> {
     }
 }
 
-fn micros(millis: u64) -> Result<Ts, ConvertError> {
+/// Fails when both sides are present and the best bid is not below the best
+/// ask, which a resting book never shows.
+pub(crate) fn check_not_crossed(snapshot: &BookSnapshot) -> Result<(), ConvertError> {
+    match (snapshot.bids.first(), snapshot.asks.first()) {
+        (Some(bid), Some(ask)) if bid.price >= ask.price => Err(ConvertError::LockedOrCrossed),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn micros(millis: u64) -> Result<Ts, ConvertError> {
     millis
         .checked_mul(1000)
         .filter(|micros| *micros <= MAX_VALUE)
@@ -233,10 +248,8 @@ impl WireBbo {
             ask.as_slice(),
             market,
         )?;
-        match (snapshot.bids.first(), snapshot.asks.first()) {
-            (Some(bid), Some(ask)) if bid.price >= ask.price => Err(ConvertError::LockedOrCrossed),
-            _ => Ok(snapshot),
-        }
+        check_not_crossed(&snapshot)?;
+        Ok(snapshot)
     }
 }
 

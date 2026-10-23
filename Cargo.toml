@@ -29,7 +29,9 @@ unwrap_used = "warn"
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
+base64 = "0.22.1"
 engine = { path = "crates/engine" }
+flate2 = "1.1.10"
 futures-util = "0.3.34"
 generator = { path = "crates/generator" }
 hyperliquid-adapter = { path = "crates/adapters/hyperliquid" }

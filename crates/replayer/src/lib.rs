@@ -300,6 +300,12 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
                     recorded.push(Recorded::Trade(trade.to_trade(market).map_err(convert)?));
                 }
             }
+            // The channel check above already turns `l2` lines away; they are
+            // not replayed yet.
+            Message::L2(_) => {
+                let channel = "l2".to_owned();
+                return Err(LoadError::Channel { line, channel });
+            }
         }
     }
     recorded.sort_by_key(Recorded::key);
@@ -637,6 +643,10 @@ mod tests {
         assert!(err.to_string().starts_with("line 8:"));
         let err = load(&recording(&["{}"]), &engine::market()).unwrap_err();
         assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "(none)"));
+        // The adapter parses `l2` lines, but replays do not use them yet.
+        let l2 = r#"{"channel":"l2","data":{"c":"abc"}}"#;
+        let err = load(&recording(&[l2]), &engine::market()).unwrap_err();
+        assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "l2"));
     }
 
     #[test]

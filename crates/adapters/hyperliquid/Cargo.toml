@@ -7,13 +7,13 @@ publish.workspace = true
 description = "Translates Hyperliquid market data into integer ticks and lots."
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
 matching.workspace = true
 protocol.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
