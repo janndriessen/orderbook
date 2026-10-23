@@ -192,6 +192,9 @@ pub struct Loaded {
     pub incomplete_last_line: bool,
     /// Lines of the `l2` feed, which replays do not use yet and skip.
     pub skipped_l2_lines: usize,
+    /// `error` lines, which the source sends for a request it refused, left
+    /// out.
+    pub skipped_error_lines: usize,
 }
 
 /// The most levels per side that a snapshot of only the top of the book
@@ -233,7 +236,7 @@ impl Recorded {
 /// is left out and counted in `skipped_bbos`.
 ///
 /// Subscription acknowledgements and `pong` replies are skipped, as are empty
-/// lines. Lines of the `l2` feed are skipped unparsed and counted in
+/// lines and `error` lines (counted in `skipped_error_lines`). Lines of the `l2` feed are skipped unparsed and counted in
 /// `skipped_l2_lines`. Recorded order can differ from time order, so the data
 /// is sorted by time (stable) before it is translated. Trades at or before the
 /// first full snapshot's time are dropped: the first trades message after
@@ -254,6 +257,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
     let mut incomplete_last_line = false;
     let mut skipped_bbos = 0;
     let mut skipped_l2_lines = 0;
+    let mut skipped_error_lines = 0;
     let mut recorded = Vec::new();
     for (index, text) in recording.lines().enumerate() {
         let line = index + 1;
@@ -276,6 +280,10 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
             Err(source) => return Err(parse(source)),
         };
         if matches!(channel.as_deref(), Some("subscriptionResponse" | "pong")) {
+            continue;
+        }
+        if channel.as_deref() == Some("error") {
+            skipped_error_lines += 1;
             continue;
         }
         if channel.as_deref() == Some("l2") {
@@ -346,6 +354,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         skipped_bbos,
         incomplete_last_line,
         skipped_l2_lines,
+        skipped_error_lines,
     })
 }
 
@@ -646,12 +655,22 @@ mod tests {
 
     #[test]
     fn an_unknown_or_missing_channel_names_its_line() {
-        let error = r#"{"channel":"error","data":"x"}"#;
-        let err = load(&recording(&[error]), &engine::market()).unwrap_err();
-        assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "error"));
+        let unknown = r#"{"channel":"orders","data":"x"}"#;
+        let err = load(&recording(&[unknown]), &engine::market()).unwrap_err();
+        assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "orders"));
         assert!(err.to_string().starts_with("line 8:"));
         let err = load(&recording(&["{}"]), &engine::market()).unwrap_err();
         assert!(matches!(&err, LoadError::Channel { line: 8, channel } if channel == "(none)"));
+    }
+
+    #[test]
+    fn error_lines_are_skipped_and_counted() {
+        let error = r#"{"channel":"error","data":"Already subscribed"}"#;
+        let with = load(&recording(&[error, error]), &engine::market()).expect("loads");
+        let without = load(&recording(&[]), &engine::market()).expect("loads");
+        assert_eq!(with.skipped_error_lines, 2);
+        assert_eq!(without.skipped_error_lines, 0);
+        assert_eq!(with.commands, without.commands);
     }
 
     #[test]

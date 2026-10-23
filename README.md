@@ -60,13 +60,13 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] `hyperliquid-adapter`: a `Translator` turns full snapshots (20 levels per side, about every 5 s), top-of-book snapshots (5 levels per side, about every 0.5 s; only the price window they span is mirrored), the best bid and offer (one level per side, sent whenever either changes, about every 0.1 s; a `null` side is empty and changes nothing; a locked or crossed one is its own conversion error) and trades into protocol commands through a shadow book of what the engine holds, with counters where it diverges from the source
   - [x] `replayer` crate: paces recorded `(time, command)` pairs into engine steps at real time, n times or maximum speed
   - [x] `replay` binary: loads a recording and serves it through the engine
-    - a line on another channel, a malformed line or an unconvertible value fails the load with its line number; a cut-off last line of a recording still being written is left out with a warning
+    - a line on another channel, a malformed line or an unconvertible value fails the load with its line number; `error` lines (the source refusing a request) are skipped and counted; a cut-off last line of a recording still being written is left out with a warning
     - a snapshot with at most 5 levels per side is a top snapshot, a deeper one a full snapshot; a recording without a full snapshot is refused
     - a best bid and offer is a top snapshot of one level per side; one with a bid at or above the ask is skipped and counted
     - the replay starts at the first full snapshot: the trades at or before it (the backlog sent on subscribing, which the snapshot already reflects), and the top snapshots and best bid and offer messages before it, are dropped
     - the rest is translated with the adapter's `Translator`
     - lines of the `l2` feed are skipped and counted; replays do not use them yet
-    - logs the translator's divergence counters, the dropped trades and top snapshots (best bid and offer messages included), the skipped locked or crossed ones, the skipped `l2` lines, and recorded gaps over 60 s
+    - logs the translator's divergence counters, the dropped trades and top snapshots (best bid and offer messages included), the skipped locked or crossed ones, the skipped `l2` lines, the skipped `error` lines (a warning), and recorded gaps over 60 s
     - after the last command it keeps serving the final book until Ctrl-C
   - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against two recordings of public BTC data: 40 s without and 50 s with the best bid and offer
     - after replaying one, the matcher's book equals every recorded full snapshot exactly, and the top 5 levels per side equal every recorded top snapshot

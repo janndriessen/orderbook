@@ -56,6 +56,12 @@ async fn main() -> anyhow::Result<()> {
     if loaded.incomplete_last_line {
         warn!("the last line is incomplete and was left out; is the recorder still running?");
     }
+    if loaded.skipped_error_lines > 0 {
+        warn!(
+            lines = loaded.skipped_error_lines,
+            "the recording holds error lines from the source, which were left out"
+        );
+    }
     if !matches!(speed, Speed::Max | Speed::Step) {
         for (index, gap) in long_waits(&loaded.commands, LONG_WAIT) {
             warn!(index, ?gap, "long gap after this command in the recording");
