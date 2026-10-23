@@ -181,9 +181,12 @@ pub struct Loaded {
     pub divergence: Divergence,
     /// Trades at or before the first full snapshot's time, which were left out.
     pub dropped_trades: usize,
-    /// Top-of-book snapshots before the first full snapshot, which were left
-    /// out.
+    /// Top-of-book snapshots, best bid and offer messages included, before
+    /// the first full snapshot, which were left out.
     pub dropped_top_snapshots: usize,
+    /// Best bid and offer messages with a bid at or above the ask, which were
+    /// left out as unusable.
+    pub skipped_bbos: usize,
     /// Whether the last line was cut off and left out, as happens while the
     /// recorder is still writing.
     pub incomplete_last_line: bool,
@@ -211,8 +214,8 @@ impl Recorded {
     }
 }
 
-/// Translates a JSON Lines recording of `l2Book` and `trades` messages, with
-/// prices and sizes converted for `market`.
+/// Translates a JSON Lines recording of `l2Book`, `bbo` and `trades` messages,
+/// with prices and sizes converted for `market`.
 ///
 /// The two book feeds send messages of the same shape, so the depth tells them
 /// apart: a snapshot with at most [`TOP_DEPTH`] levels on each side is the top
@@ -222,6 +225,10 @@ impl Recorded {
 /// stale levels beyond its window linger until the next full snapshot, and a
 /// side that is empty in it keeps its stale levels, which can make post-only
 /// orders on the other side be rejected (counted in `rejected_makers`).
+///
+/// A `bbo` message is a top snapshot of one level per side and is mirrored the
+/// same way and counts as one for dropping. One with a bid at or above the ask
+/// is left out and counted in `skipped_bbos`.
 ///
 /// Subscription acknowledgements and `pong` replies are skipped, as are empty
 /// lines. Recorded order can differ from time order, so the data is sorted by
@@ -242,6 +249,7 @@ impl Recorded {
 pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
     let unfinished_line = (!recording.ends_with('\n')).then(|| recording.lines().count());
     let mut incomplete_last_line = false;
+    let mut skipped_bbos = 0;
     let mut recorded = Vec::new();
     for (index, text) in recording.lines().enumerate() {
         let line = index + 1;
@@ -266,7 +274,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         if matches!(channel.as_deref(), Some("subscriptionResponse" | "pong")) {
             continue;
         }
-        if !matches!(channel.as_deref(), Some("l2Book" | "trades")) {
+        if !matches!(channel.as_deref(), Some("l2Book" | "bbo" | "trades")) {
             let channel = channel.unwrap_or_else(|| "(none)".to_owned());
             return Err(LoadError::Channel { line, channel });
         }
@@ -282,10 +290,11 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
                     },
                 );
             }
-            Message::Bbo(_) => {
-                let channel = "bbo".to_owned();
-                return Err(LoadError::Channel { line, channel });
-            }
+            Message::Bbo(bbo) => match bbo.to_snapshot(market) {
+                Ok(snapshot) => recorded.push(Recorded::Top(snapshot)),
+                Err(ConvertError::LockedOrCrossed) => skipped_bbos += 1,
+                Err(source) => return Err(convert(source)),
+            },
             Message::Trades(trades) => {
                 for trade in &trades {
                     recorded.push(Recorded::Trade(trade.to_trade(market).map_err(convert)?));
@@ -320,6 +329,7 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         divergence: translator.divergence(),
         dropped_trades,
         dropped_top_snapshots,
+        skipped_bbos,
         incomplete_last_line,
     })
 }
@@ -530,6 +540,85 @@ mod tests {
         assert_eq!(loaded.commands.iter().map(|c| c.0).min(), Some(3_000_000));
         let from_full = load(&[full, top(4_000)].join("\n"), &engine::market()).unwrap();
         assert_eq!(loaded.commands, from_full.commands);
+    }
+
+    /// A best bid and offer at `time` milliseconds; `None` is a `null` side.
+    fn bbo_line(time: u64, bid: Option<&str>, ask: Option<&str>) -> String {
+        let side = |px: Option<&str>| {
+            px.map_or("null".to_owned(), |px| {
+                format!(r#"{{"n":1,"px":"{px}","sz":"1.0"}}"#)
+            })
+        };
+        format!(
+            r#"{{"channel":"bbo","data":{{"coin":"BTC","time":{time},"bbo":[{},{}]}}}}"#,
+            side(bid),
+            side(ask)
+        )
+    }
+
+    #[test]
+    fn a_trade_at_the_time_of_a_best_bid_and_offer_comes_first() {
+        let full = book_line(1_000, TOP_DEPTH as u64 + 1);
+        // The best bid and offer is written first and restores the level the
+        // trade takes 0.2 from, so it only has work to do after the trade.
+        let bbo = bbo_line(2_000, Some("84000.0"), Some("84001.0"));
+        let loaded = load(&[full, bbo, TRADE.to_owned()].join("\n"), &engine::market()).unwrap();
+        assert_eq!(loaded.commands.len(), 7 + 2);
+        assert!(matches!(
+            loaded.commands[7].1,
+            Command::Place {
+                order_type: protocol::OrderType::Limit {
+                    time_in_force: protocol::TimeInForce::Ioc,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            loaded.commands[8].1,
+            Command::Place {
+                qty: 20_000,
+                order_type: protocol::OrderType::Limit {
+                    time_in_force: protocol::TimeInForce::PostOnly,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn best_bid_and_offers_before_the_first_full_snapshot_are_dropped_and_counted() {
+        let bbo = |time| bbo_line(time, Some("84000.0"), Some("84001.0"));
+        let full = book_line(3_000, TOP_DEPTH as u64 + 1);
+        let loaded = load(
+            &[bbo(1_000), full.clone(), bbo(4_000)].join("\n"),
+            &engine::market(),
+        )
+        .unwrap();
+        assert_eq!((loaded.dropped_top_snapshots, loaded.skipped_bbos), (1, 0));
+        let from_full = load(&[full, bbo(4_000)].join("\n"), &engine::market()).unwrap();
+        assert_eq!(loaded.commands, from_full.commands);
+    }
+
+    #[test]
+    fn a_locked_or_crossed_best_bid_and_offer_is_skipped_and_counted() {
+        let full = book_line(1_000, TOP_DEPTH as u64 + 1);
+        let lines = [
+            full.clone(),
+            bbo_line(2_000, Some("84001.0"), Some("84001.0")),
+            bbo_line(3_000, Some("84002.0"), Some("84001.0")),
+        ];
+        let loaded = load(&lines.join("\n"), &engine::market()).unwrap();
+        assert_eq!((loaded.dropped_top_snapshots, loaded.skipped_bbos), (0, 2));
+        assert_eq!(
+            loaded.commands,
+            load(&full, &engine::market()).unwrap().commands
+        );
+        // Other conversion failures still fail the load, with the line.
+        let eth = bbo_line(2_000, Some("84000.0"), None).replace("BTC", "ETH");
+        let err = load(&[full, eth].join("\n"), &engine::market()).unwrap_err();
+        assert!(matches!(err, LoadError::Convert { line: 2, .. }), "{err}");
     }
 
     #[test]

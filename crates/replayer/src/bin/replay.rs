@@ -7,8 +7,9 @@
 //! recorded moment), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`) and
 //! `RUST_LOG` (log filter, default `info`). When the recording ends the
 //! final book stays served until Ctrl-C. The replay starts at the first full
-//! book snapshot: trades at or before it and top-of-book snapshots before it
-//! are dropped, and a recording without a full snapshot is refused.
+//! book snapshot: trades at or before it and top-of-book snapshots (best bid
+//! and offer messages included) before it are dropped, and a recording without
+//! a full snapshot is refused.
 
 use std::io::BufRead;
 use std::iter;
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         commands = loaded.commands.len(),
         dropped_trades = loaded.dropped_trades,
         dropped_top_snapshots = loaded.dropped_top_snapshots,
+        skipped_bbos = loaded.skipped_bbos,
         divergence = ?loaded.divergence,
         "recording loaded"
     );

@@ -107,6 +107,7 @@ impl Translator {
     /// lowest bid and asks at or below its highest ask. Inside it the commands
     /// are those of [`Translator::on_snapshot`]. A side with no levels changes
     /// nothing, since the snapshot does not say where its window ends.
+    /// A best bid and offer is the case of one level per side.
     ///
     /// Levels outside the window cannot cross anything placed inside it: they
     /// lie beyond the window's far edge, below the lowest bid or above the
@@ -786,6 +787,78 @@ mod tests {
             levels_of(&t, Side::Buy),
             [(97, 5), (98, 5), (99, 5), (100, 5)]
         );
+    }
+
+    /// A best bid and offer: a top snapshot of one level per side.
+    fn bbo(ts: Ts, bid: Option<(Price, Qty)>, ask: Option<(Price, Qty)>) -> BookSnapshot {
+        snap(ts, bid.as_slice(), ask.as_slice())
+    }
+
+    #[test]
+    fn a_best_bid_and_offer_grows_a_level_at_an_unchanged_price() {
+        let mut t = deep_book();
+        let out = commands(t.on_top(&bbo(2, Some((100, 8)), Some((101, 4)))));
+        assert_eq!(out, [post(8, Side::Buy, 100, 3)]);
+        assert_eq!(levels_of(&t, Side::Buy)[3], (100, 8));
+    }
+
+    #[test]
+    fn a_best_bid_and_offer_shrinks_a_level_newest_order_first() {
+        let mut t = with_three_bids();
+        let out = commands(t.on_top(&bbo(2, Some((100, 6)), None)));
+        assert_eq!(
+            out,
+            [
+                Command::Cancel { order_id: 3 },
+                Command::Replace {
+                    order_id: 2,
+                    price: 100,
+                    qty: 2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_touch_moving_inward_cancels_the_stale_opposite_level_before_the_place() {
+        let mut t = deep_book();
+        let stale_ask = level_ids(&t, Side::Sell, 101);
+        // The bid rises to the old best ask, whose level is gone from the new best ask.
+        let out = commands(t.on_top(&bbo(2, Some((101, 3)), Some((102, 5)))));
+        assert_eq!(
+            out,
+            [
+                Command::Cancel {
+                    order_id: stale_ask[0]
+                },
+                post(8, Side::Buy, 101, 3)
+            ]
+        );
+        assert_eq!(t.divergence(), Divergence::default());
+    }
+
+    #[test]
+    fn a_touch_moving_outward_cancels_the_stale_better_levels() {
+        let mut t = deep_book();
+        let stale: Vec<OrderId> = [100, 99]
+            .iter()
+            .flat_map(|&price| level_ids(&t, Side::Buy, price))
+            .collect();
+        let out = commands(t.on_top(&bbo(2, Some((98, 5)), Some((101, 4)))));
+        assert_eq!(out.len(), 2);
+        for id in stale {
+            assert!(out.contains(&cancel(id)));
+        }
+        assert_eq!(levels_of(&t, Side::Buy), [(97, 5), (98, 5)]);
+    }
+
+    #[test]
+    fn a_null_side_of_a_best_bid_and_offer_changes_nothing_there() {
+        let mut t = deep_book();
+        assert!(t.on_top(&bbo(2, None, None)).is_empty());
+        assert!(t.on_top(&bbo(3, None, Some((101, 4)))).is_empty());
+        assert_eq!(levels_of(&t, Side::Buy).len(), 4);
+        assert_eq!(levels_of(&t, Side::Sell).len(), 3);
     }
 
     #[test]
