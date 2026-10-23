@@ -67,7 +67,11 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - the rest is translated with the adapter's `Translator`
     - logs the translator's divergence counters, the dropped trades and top snapshots (best bid and offer messages included), the skipped locked or crossed ones, and recorded gaps over 60 s
     - after the last command it keeps serving the final book until Ctrl-C
-  - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against 40 s of recorded public BTC data: after replaying it, the matcher's book equals every recorded full snapshot exactly and the top 5 levels per side equal every recorded top snapshot, and the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots and trades in time order
+  - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against two recordings of public BTC data: 40 s without and 50 s with the best bid and offer
+    - after replaying one, the matcher's book equals every recorded full snapshot exactly, and the top 5 levels per side equal every recorded top snapshot
+    - the best bid and ask equal every recorded best bid and offer (price and total)
+    - the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots, best bid and offer messages and trades in time order
+    - the exact number of records compared is asserted, counted from the fixtures' lines separately
   - [x] Step mode of the replayer: `REPLAY_SPEED=step` waits for Enter before each recorded moment
   - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (the standard and the fast feed), the best bid and offer, and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book, best bid and offer or trades message; acknowledgements, `pong` and `error` messages count as no progress
   - [x] Re-measure level lengths and cancel cost on replayed Hyperliquid data: real levels stay short, so levels remain a `VecDeque` (`levels` binary, results under the price-levels trade-off)

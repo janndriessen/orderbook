@@ -1,9 +1,11 @@
 //! Replays a recorded session and compares the book with the one the source
 //! reported.
 //!
-//! The fixture is 40 seconds of public BTC market data, recorded from
-//! Hyperliquid with the `users` fields removed. It holds both book feeds:
-//! full snapshots of 20 levels per side and top snapshots of 5.
+//! The fixtures are public BTC market data, recorded from Hyperliquid with the
+//! `users` fields removed. The first, 40 seconds, holds both book feeds: full
+//! snapshots of 20 levels per side and top snapshots of 5. The second, 50
+//! seconds, adds the best bid and offer, which is how a recording made before
+//! that feed was subscribed stays covered.
 //!
 //! The test deliberately parses the raw JSON with its own decimal conversion,
 //! so it shares no code with the adapter's parser or the translator it checks.
@@ -21,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 const FIXTURE: &str = include_str!("fixtures/hyperliquid-btc-40s.jsonl");
+const FIXTURE_BBO: &str = include_str!("fixtures/hyperliquid-btc-bbo-50s.jsonl");
 /// How long the service may stay silent before the test gives up instead of
 /// hanging.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +50,20 @@ struct Snapshot {
     full: bool,
     bids: Levels,
     asks: Levels,
+}
+
+/// A best bid and offer: the best level of each side, `None` when empty.
+struct Bbo {
+    ts: u64,
+    bid: Option<(i64, u64)>,
+    ask: Option<(i64, u64)>,
+}
+
+impl Bbo {
+    /// A bid at or above the ask is not a resting book; the replay skips it.
+    fn locked_or_crossed(&self) -> bool {
+        matches!((self.bid, self.ask), (Some((bid, _)), Some((ask, _))) if bid >= ask)
+    }
 }
 
 struct Trade {
@@ -92,6 +109,28 @@ fn snapshots(text: &str) -> Vec<Snapshot> {
     all
 }
 
+fn bbos(text: &str) -> Vec<Bbo> {
+    let level = |value: &Value| {
+        (!value.is_null()).then(|| {
+            let price = scaled(value["px"].as_str().expect("px"), 0) as i64;
+            (
+                price,
+                scaled(value["sz"].as_str().expect("sz"), LOT_DECIMALS),
+            )
+        })
+    };
+    let mut all: Vec<Bbo> = recorded(text, "bbo")
+        .map(|m| Bbo {
+            ts: m["data"]["time"].as_u64().expect("time") * 1_000,
+            bid: level(&m["data"]["bbo"][0]),
+            ask: level(&m["data"]["bbo"][1]),
+        })
+        .filter(|bbo| !bbo.locked_or_crossed())
+        .collect();
+    all.sort_by_key(|b| b.ts);
+    all
+}
+
 fn trades(text: &str) -> Vec<Trade> {
     let mut all: Vec<Trade> = recorded(text, "trades")
         .flat_map(|m| m["data"].as_array().expect("trades").clone())
@@ -114,63 +153,150 @@ fn book_levels(matcher: &Matcher, side: Side) -> Levels {
         .collect()
 }
 
-/// Replays `text` and compares the matcher with every snapshot it holds;
-/// returns how many full and top snapshots were checked.
-fn check_every_snapshot(text: &str) -> (usize, usize) {
+/// How many of each kind of record `check_every_record` compared.
+#[derive(Debug, PartialEq, Eq)]
+struct Checked {
+    full: usize,
+    tops: usize,
+    bbos: usize,
+}
+
+/// Replays `text` and compares the matcher with every snapshot and every best
+/// bid and offer it holds: after the commands up to a record's time, a full
+/// snapshot must equal the book, a top snapshot its best levels, and a best
+/// bid and offer the best bid and ask (price and total).
+fn check_every_record(text: &str) -> Checked {
+    enum Record<'a> {
+        Snapshot(&'a Snapshot),
+        Bbo(&'a Bbo),
+    }
     let loaded = replayer::load(text, &engine::market()).expect("load");
     let mut matcher = Matcher::new();
     let mut commands = loaded.commands.into_iter().peekable();
     let snapshots = snapshots(text);
+    let bbos = bbos(text);
     // The replay starts at the first full snapshot.
     let start = snapshots
         .iter()
-        .position(|s| s.full)
-        .expect("a full snapshot");
-    let (mut full, mut tops) = (0, 0);
-    for snapshot in &snapshots[start..] {
-        while let Some((_, command)) = commands.next_if(|(ts, _)| *ts <= snapshot.ts) {
+        .find(|s| s.full)
+        .expect("a full snapshot")
+        .ts;
+    let mut records: Vec<(u64, u8, Record)> = snapshots
+        .iter()
+        .filter(|s| s.ts >= start)
+        .map(|s| (s.ts, 0, Record::Snapshot(s)))
+        .chain(
+            bbos.iter()
+                .filter(|b| b.ts >= start)
+                .map(|b| (b.ts, 1, Record::Bbo(b))),
+        )
+        .collect();
+    records.sort_by_key(|&(ts, order, _)| (ts, order));
+    let mut checked = Checked {
+        full: 0,
+        tops: 0,
+        bbos: 0,
+    };
+    for (ts, _, record) in records {
+        while let Some((_, command)) = commands.next_if(|(command_ts, _)| *command_ts <= ts) {
             matcher.apply(command);
         }
         let (bids, asks) = (
             book_levels(&matcher, Side::Buy),
             book_levels(&matcher, Side::Sell),
         );
-        if snapshot.full {
-            assert_eq!(bids, snapshot.bids, "bids at {}", snapshot.ts);
-            assert_eq!(asks, snapshot.asks, "asks at {}", snapshot.ts);
-            full += 1;
-        } else {
-            assert_eq!(
-                best(&bids, Side::Buy, TOP_DEPTH),
-                best(&snapshot.bids, Side::Buy, TOP_DEPTH)
-            );
-            assert_eq!(
-                best(&asks, Side::Sell, TOP_DEPTH),
-                best(&snapshot.asks, Side::Sell, TOP_DEPTH)
-            );
-            tops += 1;
+        match record {
+            Record::Snapshot(snapshot) if snapshot.full => {
+                assert_eq!(bids, snapshot.bids, "bids at {ts}");
+                assert_eq!(asks, snapshot.asks, "asks at {ts}");
+                checked.full += 1;
+            }
+            Record::Snapshot(snapshot) => {
+                assert_eq!(
+                    best(&bids, Side::Buy, TOP_DEPTH),
+                    best(&snapshot.bids, Side::Buy, TOP_DEPTH),
+                    "top bids at {ts}"
+                );
+                assert_eq!(
+                    best(&asks, Side::Sell, TOP_DEPTH),
+                    best(&snapshot.asks, Side::Sell, TOP_DEPTH),
+                    "top asks at {ts}"
+                );
+                checked.tops += 1;
+            }
+            Record::Bbo(bbo) => {
+                if let Some(bid) = bbo.bid {
+                    assert_eq!(best(&bids, Side::Buy, 1), [bid], "best bid at {ts}");
+                }
+                if let Some(ask) = bbo.ask {
+                    assert_eq!(best(&asks, Side::Sell, 1), [ask], "best ask at {ts}");
+                }
+                checked.bbos += 1;
+            }
         }
     }
-    (full, tops)
+    checked
 }
 
 #[test]
 fn every_snapshot_is_rebuilt_exactly() {
-    let (full, tops) = check_every_snapshot(FIXTURE);
-    println!("{full} full and {tops} top snapshots checked");
-    assert!(full > 5 && tops > 5);
+    // Counted from the fixture's lines with a separate script: l2Book lines
+    // with more than 5 levels on a side are full, the others top snapshots.
+    assert_eq!(
+        check_every_record(FIXTURE),
+        Checked {
+            full: 8,
+            tops: 74,
+            bbos: 0
+        }
+    );
+}
+
+#[test]
+fn every_snapshot_and_best_bid_and_offer_is_rebuilt_exactly() {
+    // Counted the same way; none of the 330 best bid and offer lines is
+    // locked or crossed, and every record is at or after the first full snapshot.
+    assert_eq!(
+        check_every_record(FIXTURE_BBO),
+        Checked {
+            full: 10,
+            tops: 93,
+            bbos: 330
+        }
+    );
+}
+
+/// One side of a best bid and offer as levels.
+fn one(level: Option<(i64, u64)>) -> Levels {
+    level.into_iter().collect()
+}
+
+/// Replaces the price window a top-of-book view spans on each side: bids at or
+/// above its lowest bid and asks at or below its highest ask. A side the view
+/// does not have changes nothing.
+fn replace_window(bids: &mut Levels, asks: &mut Levels, top_bids: &Levels, top_asks: &Levels) {
+    if let Some(&lowest) = top_bids.keys().next() {
+        bids.retain(|&price, _| price < lowest);
+        bids.extend(top_bids);
+    }
+    if let Some(&highest) = top_asks.keys().next_back() {
+        asks.retain(|&price, _| price > highest);
+        asks.extend(top_asks);
+    }
 }
 
 /// The book the feed should end on, from a plain level model applied in time
-/// order (trades before a snapshot of the same time): a full snapshot replaces
-/// both sides, a top snapshot replaces only the price window it spans on each
-/// side (an empty side changes nothing), and a trade takes its size off the
+/// order (trades before a snapshot of the same time, a best bid and offer
+/// after it): a full snapshot replaces both sides, a top snapshot or a best
+/// bid and offer (one level per side) replaces only the price window it spans
+/// on each side (an empty side changes nothing), and a trade takes its size off the
 /// level at its price on the side it hit. Events before the first full
 /// snapshot are ignored, as the replay drops them.
 fn expected_final_book(text: &str) -> (Levels, Levels) {
     enum Event {
         Trade(Trade),
         Snapshot(Snapshot),
+        Bbo(Bbo),
     }
     let mut events: Vec<(u64, u8, Event)> = trades(text)
         .into_iter()
@@ -180,6 +306,7 @@ fn expected_final_book(text: &str) -> (Levels, Levels) {
                 .into_iter()
                 .map(|s| (s.ts, 1, Event::Snapshot(s))),
         )
+        .chain(bbos(text).into_iter().map(|b| (b.ts, 2, Event::Bbo(b))))
         .collect();
     events.sort_by_key(|&(ts, order, _)| (ts, order));
     let (mut bids, mut asks) = (Levels::new(), Levels::new());
@@ -191,14 +318,10 @@ fn expected_final_book(text: &str) -> (Levels, Levels) {
                 (bids, asks) = (snapshot.bids, snapshot.asks);
             }
             Event::Snapshot(top) if started => {
-                if let Some(&lowest) = top.bids.keys().next() {
-                    bids.retain(|&price, _| price < lowest);
-                    bids.extend(&top.bids);
-                }
-                if let Some(&highest) = top.asks.keys().next_back() {
-                    asks.retain(|&price, _| price > highest);
-                    asks.extend(&top.asks);
-                }
+                replace_window(&mut bids, &mut asks, &top.bids, &top.asks);
+            }
+            Event::Bbo(bbo) if started => {
+                replace_window(&mut bids, &mut asks, &one(bbo.bid), &one(bbo.ask));
             }
             Event::Trade(trade) if started => {
                 // A buy takes liquidity from the asks, a sell from the bids.
@@ -321,6 +444,7 @@ async fn check_feed_end(text: &str) {
 #[tokio::test]
 async fn the_feed_ends_on_the_source_book() {
     check_feed_end(FIXTURE).await;
+    check_feed_end(FIXTURE_BBO).await;
 }
 
 /// A full snapshot, a sell trade that reduces bid 100, then a top snapshot
@@ -359,7 +483,14 @@ fn trade_outside_a_later_top_window() -> String {
 #[tokio::test]
 async fn a_trade_outside_a_later_top_window_stays_in_the_book() {
     let text = trade_outside_a_later_top_window();
-    assert_eq!(check_every_snapshot(&text), (1, 1));
+    assert_eq!(
+        check_every_record(&text),
+        Checked {
+            full: 1,
+            tops: 1,
+            bbos: 0
+        }
+    );
     let (bids, asks) = expected_final_book(&text);
     // Bid 100 keeps the reduction from the trade; ask 111 the later one.
     assert_eq!(bids.get(&100), Some(&60_000));
