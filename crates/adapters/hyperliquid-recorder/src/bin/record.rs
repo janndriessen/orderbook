@@ -1,9 +1,11 @@
 //! The `record` binary: writes the live BTC book and trades from Hyperliquid's
 //! public WebSocket to a JSON Lines file, one received message per line.
 //!
-//! Two book feeds are subscribed: the standard one, 20 levels per side about
-//! every 5 seconds, and the fast one, 5 levels per side about every half
-//! second. Their messages have the same shape; only the depth tells them apart.
+//! Three book feeds are subscribed: the standard one, 20 levels per side about
+//! every 5 seconds, the fast one, 5 levels per side about every half second,
+//! and the best bid and offer, one level per side, sent whenever either changes
+//! (about every 0.1 seconds). The two book feeds have the same shape and only
+//! their depth tells them apart; the best bid and offer has its own channel.
 //!
 //! Every message is parsed and written back re-serialized (keys sorted), with
 //! any `users` field, which carries wallet addresses, removed at every depth.
@@ -15,7 +17,7 @@
 //! - no full book snapshot (more than 5 levels on a side) arrives for 30
 //!   seconds, which catches a stalled standard feed that the fast feed would
 //!   otherwise hide;
-//! - no book or trades message arrives for 30 seconds.
+//! - no book, best bid and offer or trades message arrives for 30 seconds.
 //!
 //! Acknowledgements, `pong` replies and `error` messages count as neither.
 //!
@@ -60,6 +62,8 @@ enum Received {
     FullBook,
     /// A book snapshot of at most the fast feed's depth.
     TopBook,
+    /// A best bid and offer message.
+    BestBidOffer,
     /// A trades message.
     Trades,
     /// Acknowledgements, `pong`, `error` and anything else.
@@ -76,6 +80,7 @@ fn classify(value: &Value) -> Received {
                 Received::TopBook
             }
         }
+        Some("bbo") => Received::BestBidOffer,
         Some("trades") => Received::Trades,
         _ => Received::Housekeeping,
     }
@@ -180,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
     let subscriptions = [
         json!({"type": "l2Book", "coin": "BTC"}),
         json!({"type": "l2Book", "coin": "BTC", "fast": true}),
+        json!({"type": "bbo", "coin": "BTC"}),
         json!({"type": "trades", "coin": "BTC"}),
     ];
     for subscription in subscriptions {
@@ -230,6 +236,10 @@ mod tests {
         assert_eq!(
             classify(&json!({"channel": "trades", "data": []})),
             Received::Trades
+        );
+        assert_eq!(
+            classify(&json!({"channel": "bbo", "data": {"coin": "BTC", "bbo": [null, null]}})),
+            Received::BestBidOffer
         );
         for housekeeping in [
             json!({"channel": "pong"}),

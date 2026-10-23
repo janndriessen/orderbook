@@ -68,7 +68,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - after the last command it keeps serving the final book until Ctrl-C
   - [x] Oracle test (`crates/replayer/tests/oracle.rs`) against 40 s of recorded public BTC data: after replaying it, the matcher's book equals every recorded full snapshot exactly and the top 5 levels per side equal every recorded top snapshot, and the feed of the running service, followed from its snapshot to the end of the flow, ends on the book of an independent level model that applies the recorded full snapshots, top snapshots and trades in time order
   - [x] Step mode of the replayer: `REPLAY_SPEED=step` waits for Enter before each recorded moment
-  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (both the standard and the fast feed) and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book or trades message; acknowledgements, `pong` and `error` messages count as no progress
+  - [x] `hyperliquid-recorder` crate with the `record` binary: writes the live BTC book (the standard and the fast feed), the best bid and offer, and trades from Hyperliquid's public WebSocket to a JSON Lines file under `data/`, with every `users` field (wallet addresses) removed; the run ends with an error, with no reconnect, on a closed or lost connection, on a text message that is not valid JSON (never written), after 30 seconds without a full book snapshot (more than 5 levels on a side; catches a stalled standard feed), or after 30 seconds without any book, best bid and offer or trades message; acknowledgements, `pong` and `error` messages count as no progress
   - [x] Re-measure level lengths and cancel cost on replayed Hyperliquid data: real levels stay short, so levels remain a `VecDeque` (`levels` binary, results under the price-levels trade-off)
 - [ ] Deployment to a small Hetzner server
 
@@ -80,7 +80,7 @@ The pinned toolchain (Rust 1.99.1, see `rust-toolchain.toml`) is installed autom
 cargo test --workspace                   # also regenerates the TypeScript types in web/src/protocol/ and checks a replayed recording against the source's books
 cargo run -p engine --bin orderbook      # serves the live feed at ws://127.0.0.1:8080/ws
 cargo run -p harness --release --bin bench   # matcher throughput and cancel cost; release build only, numbers depend on the machine
-cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard and fast feed) and trades from Hyperliquid to data/, until Ctrl-C
+cargo run -p hyperliquid-recorder --bin record   # records the live BTC book (standard and fast feed), the best bid and offer, and trades from Hyperliquid to data/, until Ctrl-C
 REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # serves a recording through the engine
 REPLAY_PATH=data/<recording>.jsonl cargo run --release -p replayer --bin levels   # level lengths and cancel cost on a recording; release build only
 REPLAY_SPEED=step REPLAY_PATH=data/<recording>.jsonl cargo run -p replayer --bin replay   # Enter plays one recorded moment
