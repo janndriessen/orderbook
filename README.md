@@ -30,7 +30,7 @@ Desktop only, in the dense style of a professional exchange order book.
 The book is a panel of up to 20 rows per side around a spread bar that stays put.
 A side with fewer levels keeps its slots and leaves its far end blank.
 On a window too short for 20 rows per side, the panel shows as many as fit.
-Numbers change at once while the depth bars ease to their new width.
+Numbers and depth bars change at once, without easing.
 A level whose size changes flashes briefly.
 The spread bar shows the last trade price with an arrow for the taker side, in the bid color for a buy and the ask color for a sell.
 A toggle opens the flow log beside it, with filtering and pause.

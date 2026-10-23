@@ -10,8 +10,8 @@
 
 /* The depth bar is the row's own background, sized from the side's edge. The
    row gets no pseudo-element: a table row's generated content can become an
-   extra cell and shift every value one column. Only the size is animated; the
-   numbers in the cells change at once. The bar stops short of the row's
+   extra cell and shift every value one column. The bar changes width at once
+   with the numbers, never over time. The bar stops short of the row's
    bottom so neighboring bars stay apart. */
 .bid,
 .ask {
@@ -19,7 +19,6 @@
   background:
     linear-gradient(var(--side-depth), var(--side-depth)) left top /
     calc(var(--depth) * 100%) calc(100% - var(--row-gap)) no-repeat;
-  transition: background-size var(--duration-bar) var(--ease-out);
 }
 
 .price {

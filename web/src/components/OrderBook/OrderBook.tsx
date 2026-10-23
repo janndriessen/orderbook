@@ -5,7 +5,6 @@ import type { MarketInfo } from "../../protocol/MarketInfo";
 import { BookSide } from "./BookSide";
 import styles from "./OrderBook.module.css";
 import { SpreadBar } from "./SpreadBar";
-import { useEasedScale } from "./useEasedScale";
 import { useRowsPerSide } from "./useRowsPerSide";
 
 /**
@@ -33,7 +32,6 @@ export function OrderBook({ book, market, lastTrade }: Props) {
     const largest = Math.max(asks.at(-1)?.total ?? 0, bids.at(-1)?.total ?? 0);
     return { asks, bids, largest };
   }, [book.asks, book.bids, slots]);
-  const maxTotal = useEasedScale(largest);
 
   return (
     <section
@@ -53,7 +51,7 @@ export function OrderBook({ book, market, lastTrade }: Props) {
           side="ask"
           rows={asks}
           slots={slots}
-          maxTotal={maxTotal}
+          maxTotal={largest}
           market={market}
         />
         <SpreadBar
@@ -66,7 +64,7 @@ export function OrderBook({ book, market, lastTrade }: Props) {
           side="bid"
           rows={bids}
           slots={slots}
-          maxTotal={maxTotal}
+          maxTotal={largest}
           market={market}
         />
       </table>
