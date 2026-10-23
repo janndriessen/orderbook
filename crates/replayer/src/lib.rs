@@ -249,24 +249,29 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
             continue;
         }
         let parse = |source| LoadError::Parse { line, source };
-        let value: serde_json::Value = match serde_json::from_str(text) {
-            Ok(value) => value,
+        let channel = match serde_json::from_str::<LineHeader>(text) {
+            Ok(_) if !text.trim_start().starts_with('{') => {
+                // The header struct also reads a JSON array, whose first
+                // element would pass for a channel.
+                let channel = "(none)".to_owned();
+                return Err(LoadError::Channel { line, channel });
+            }
+            Ok(header) => header.channel,
             Err(_) if Some(line) == unfinished_line => {
                 incomplete_last_line = true;
                 continue;
             }
             Err(source) => return Err(parse(source)),
         };
-        let channel = value.get("channel").and_then(|c| c.as_str());
-        if matches!(channel, Some("subscriptionResponse" | "pong")) {
+        if matches!(channel.as_deref(), Some("subscriptionResponse" | "pong")) {
             continue;
         }
-        if !matches!(channel, Some("l2Book" | "trades")) {
-            let channel = channel.unwrap_or("(none)").to_owned();
+        if !matches!(channel.as_deref(), Some("l2Book" | "trades")) {
+            let channel = channel.unwrap_or_else(|| "(none)".to_owned());
             return Err(LoadError::Channel { line, channel });
         }
         let convert = |source| LoadError::Convert { line, source };
-        match serde_json::from_value(value).map_err(parse)? {
+        match serde_json::from_str(text).map_err(parse)? {
             Message::L2Book(book) => {
                 let snapshot = book.to_snapshot(market).map_err(convert)?;
                 recorded.push(
@@ -313,6 +318,17 @@ pub fn load(recording: &str, market: &MarketInfo) -> Result<Loaded, LoadError> {
         dropped_top_snapshots,
         incomplete_last_line,
     })
+}
+
+/// The channel of a recorded line. The line itself is parsed as written by
+/// the adapter's strict message type afterwards: reading it into a generic
+/// JSON value first would keep only the last of repeated keys and replay a
+/// value the adapter's own parser refuses. A repeated key is an error in the
+/// fields the adapter's types name; fields they do not name, like `users`,
+/// are skipped either way.
+#[derive(serde::Deserialize)]
+struct LineHeader {
+    channel: Option<String>,
 }
 
 /// The gaps between consecutive commands, in recorded time, that exceed
@@ -541,6 +557,51 @@ mod tests {
             load(bad_data, &engine::market()),
             Err(LoadError::Parse { line: 1, .. })
         ));
+    }
+
+    #[test]
+    fn repeated_keys_in_a_line_are_rejected() {
+        let level = r#"{"n":3,"px":"84000.0","px":"90000.0","sz":"0.5"}"#;
+        let doubled = FIRST.replacen(r#"{"n":3,"px":"84000.0","sz":"0.5"}"#, level, 1);
+        assert_ne!(doubled, FIRST);
+        assert!(matches!(
+            load(&recording(&[&doubled]), &engine::market()),
+            Err(LoadError::Parse { line: 8, .. })
+        ));
+        let channel = format!(r#"{{"channel":"pong",{}"#, &SECOND[1..]);
+        assert!(matches!(
+            load(&recording(&[&channel]), &engine::market()),
+            Err(LoadError::Parse { line: 8, .. })
+        ));
+        let channel = format!(r#"{},"channel":"pong"}}"#, &SECOND[..SECOND.len() - 1]);
+        assert!(matches!(
+            load(&recording(&[&channel]), &engine::market()),
+            Err(LoadError::Parse { line: 8, .. })
+        ));
+        let trade = TRADE.replacen(r#""px":"84001.0","#, r#""px":"84001.0","px":"1.0","#, 1);
+        assert_ne!(trade, TRADE);
+        let data = r#"{"channel":"trades","data":[],"data":[]}"#;
+        for text in [trade.as_str(), data] {
+            assert!(matches!(
+                load(&recording(&[text]), &engine::market()),
+                Err(LoadError::Parse { line: 8, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_line_that_is_not_an_object_is_rejected() {
+        let market = engine::market();
+        assert!(matches!(
+            load(&recording(&[r#"["pong"]"#]), &market),
+            Err(LoadError::Channel { line: 8, .. })
+        ));
+        for text in ["42", r#"{"channel":5}"#] {
+            assert!(matches!(
+                load(&recording(&[text]), &market),
+                Err(LoadError::Parse { line: 8, .. })
+            ));
+        }
     }
 
     #[test]
