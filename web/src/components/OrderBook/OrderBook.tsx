@@ -1,5 +1,6 @@
 import { useMemo, useRef } from "react";
 import { type BookState, topRows } from "../../feed/book";
+import type { LastTrade } from "../../feed/log";
 import type { MarketInfo } from "../../protocol/MarketInfo";
 import { BookSide } from "./BookSide";
 import styles from "./OrderBook.module.css";
@@ -18,9 +19,11 @@ const ROWS_PER_SIDE = 12;
 type Props = {
   book: BookState;
   market: MarketInfo;
+  /** Newest trade seen on the feed; `null` before the first. */
+  lastTrade: LastTrade | null;
 };
 
-export function OrderBook({ book, market }: Props) {
+export function OrderBook({ book, market, lastTrade }: Props) {
   const ref = useRef<HTMLElement>(null);
   const slots = useRowsPerSide(ref, ROWS_PER_SIDE);
   const [base = "", quote = ""] = market.symbol.split("-");
@@ -57,6 +60,7 @@ export function OrderBook({ book, market }: Props) {
         <SpreadBar
           bestBid={bids[0]?.price}
           bestAsk={asks[0]?.price}
+          lastTrade={lastTrade}
           market={market}
         />
         <BookSide

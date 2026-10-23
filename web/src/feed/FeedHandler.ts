@@ -1,7 +1,12 @@
 import type { MarketInfo } from "../protocol/MarketInfo";
 import { applyMessage, type BookState } from "./book";
 import { parseFeedMessage } from "./guard";
-import { appendEvents, type LogEntry } from "./log";
+import {
+  appendEvents,
+  type LastTrade,
+  type LogEntry,
+  newestTrade,
+} from "./log";
 
 export type FeedStatus = "connecting" | "live" | "reconnecting";
 
@@ -16,6 +21,12 @@ export type FeedState = {
   market: MarketInfo | null;
   /** Order-flow events, newest first. */
   log: readonly LogEntry[];
+  /**
+   * Newest trade seen, `null` before the first. Kept apart from `log` so the
+   * log's cap cannot drop it, and kept across a reconnect and its snapshot
+   * until a newer trade arrives: the last price stays true until then.
+   */
+  lastTrade: LastTrade | null;
   /**
    * Server restarts seen since `start`. A snapshot whose sequence is below one
    * already seen can only come from a server that began numbering again; a
@@ -67,6 +78,7 @@ const INITIAL: FeedState = {
   book: null,
   market: null,
   log: [],
+  lastTrade: null,
   restarts: 0,
 };
 
@@ -200,6 +212,7 @@ export class FeedHandler {
       book,
       market: snapshot ? message.market : this.#state.market,
       log: appendEvents(snapshot ? [] : this.#state.log, message.events),
+      lastTrade: newestTrade(message.events) ?? this.#state.lastTrade,
       restarts: this.#state.restarts + (restarted ? 1 : 0),
     });
   }

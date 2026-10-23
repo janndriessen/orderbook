@@ -52,13 +52,17 @@ export const cancelRejected = (
 export const rejected = (seq: number, reason: RejectReason) =>
   envelope(seq, { type: "rejected", order_id: seq, reason });
 
-export const trade = (seq: number) =>
+export const trade = (
+  seq: number,
+  aggressor_side: "buy" | "sell" = "sell",
+  price = 1_000_000,
+) =>
   envelope(seq, {
     type: "trade",
     maker_order_id: 1,
     taker_order_id: seq,
-    aggressor_side: "sell",
-    price: 1_000_000,
+    aggressor_side,
+    price,
     qty: 250,
   });
 

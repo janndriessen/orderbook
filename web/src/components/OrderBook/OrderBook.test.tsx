@@ -1,6 +1,7 @@
 import { act, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMessage, type BookState } from "../../feed/book";
+import type { LastTrade } from "../../feed/log";
 import { level, market, snapshot } from "../../test/fixtures";
 import { stubViewport } from "../../test/layout";
 import { OrderBook } from "./OrderBook";
@@ -25,7 +26,9 @@ describe("OrderBook", () => {
   });
 
   it("labels the columns with the market's currencies", () => {
-    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    render(
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
+    );
     const headers = screen
       .getAllByRole("columnheader")
       .map((h) => h.textContent);
@@ -33,7 +36,9 @@ describe("OrderBook", () => {
   });
 
   it("shows asks above the spread with the best ask closest to it", () => {
-    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    render(
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
+    );
     const asks = within(screen.getByRole("rowgroup", { name: "Asks" }));
     expect(asks.getAllByRole("row").map((r) => cells(r))).toEqual([
       ["100,015.0", "0.500", "4.500"],
@@ -43,7 +48,9 @@ describe("OrderBook", () => {
   });
 
   it("shows bids below the spread, best first, with cumulative totals", () => {
-    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    render(
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
+    );
     const bids = within(screen.getByRole("rowgroup", { name: "Bids" }));
     expect(bids.getAllByRole("row").map((r) => cells(r))).toEqual([
       ["100,000.0", "1.000", "1.000"],
@@ -53,14 +60,22 @@ describe("OrderBook", () => {
   });
 
   it("shows the spread in price and as a percentage of the mid", () => {
-    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    render(
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
+    );
     const bar = within(screen.getByRole("rowgroup", { name: "Spread" }));
     expect(bar.getByText("5.0")).toBeInTheDocument();
     expect(bar.getByText("0.005%")).toBeInTheDocument();
   });
 
   it("shows placeholders instead of numbers when a side is empty", () => {
-    render(<OrderBook book={bookOf(snapshot({ asks: [] }))} market={market} />);
+    render(
+      <OrderBook
+        book={bookOf(snapshot({ asks: [] }))}
+        market={market}
+        lastTrade={null}
+      />,
+    );
     const bar = within(screen.getByRole("rowgroup", { name: "Spread" }));
     expect(bar.getAllByText("–")).toHaveLength(2);
   });
@@ -73,14 +88,14 @@ describe("OrderBook", () => {
     within(screen.getByRole("rowgroup", { name })).getAllByRole("row").length;
 
   it("shows twelve rows per side of a deep book on a tall viewport", () => {
-    render(<OrderBook book={deepBook()} market={market} />);
+    render(<OrderBook book={deepBook()} market={market} lastTrade={null} />);
     expect([rowCount("Asks"), rowCount("Bids")]).toEqual([12, 12]);
   });
 
   it("shows fewer rows per side when the viewport is too short for twelve", () => {
     // 20 + 20 fixed, then 6 rows of 20 px: three per side.
     stubViewport(160);
-    render(<OrderBook book={deepBook()} market={market} />);
+    render(<OrderBook book={deepBook()} market={market} lastTrade={null} />);
     expect([rowCount("Asks"), rowCount("Bids")]).toEqual([3, 3]);
   });
 
@@ -94,7 +109,7 @@ describe("OrderBook", () => {
       return rowCount(name) + empty;
     };
     const { rerender } = render(
-      <OrderBook book={bookOf(snapshot())} market={market} />,
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
     );
     expect([slots("Asks"), slots("Bids")]).toEqual([12, 12]);
 
@@ -102,6 +117,7 @@ describe("OrderBook", () => {
       <OrderBook
         book={bookOf(snapshot({ bids: [level(1_000_000, 1_000)] }))}
         market={market}
+        lastTrade={null}
       />,
     );
     expect(rowCount("Bids")).toBe(1);
@@ -124,12 +140,16 @@ describe("OrderBook", () => {
         snapshot({ bids: [level(1_000_000, 1_000)], asks: [] }),
       );
       const { rerender } = render(
-        <OrderBook book={bookOf(snapshot())} market={market} />,
+        <OrderBook
+          book={bookOf(snapshot())}
+          market={market}
+          lastTrade={null}
+        />,
       );
       // Best bid 1,000 lots of a largest total of 6,000.
       expect(depth()).toBeCloseTo(1_000 / 6_000);
 
-      rerender(<OrderBook book={thin} market={market} />);
+      rerender(<OrderBook book={thin} market={market} lastTrade={null} />);
       expect(depth()).toBeCloseTo(1_000 / 6_000);
 
       act(() => vi.advanceTimersByTime(HALF_LIFE_MS));
@@ -146,7 +166,9 @@ describe("OrderBook", () => {
     // pseudo-element on a row cannot be seen here; this guards the markup and
     // that the depth lives on the row itself as a custom property. The
     // browser check covers the CSS.
-    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    render(
+      <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
+    );
     const columns = screen.getAllByRole("columnheader").length;
     const rows = screen
       .getAllByRole("row")
@@ -177,7 +199,7 @@ describe("OrderBook", () => {
 
     it("does not flash on first appearance or when nothing changed", () => {
       const { rerender } = render(
-        <OrderBook book={book(1_500)} market={market} />,
+        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
       );
       const first = marks();
       expect(first.map((m) => m?.getAttribute("data-changes"))).toEqual([
@@ -185,27 +207,65 @@ describe("OrderBook", () => {
         "0",
         "0",
       ]);
-      rerender(<OrderBook book={book(1_500)} market={market} />);
+      rerender(
+        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
+      );
       expect(marks()).toEqual(first);
     });
 
     it("restarts the flash of the changed level on every change, and only there", () => {
       const { rerender } = render(
-        <OrderBook book={book(1_500)} market={market} />,
+        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
       );
       const [far0, best0, bid0] = marks();
 
-      rerender(<OrderBook book={book(900)} market={market} />);
+      rerender(<OrderBook book={book(900)} market={market} lastTrade={null} />);
       const [far1, best1, bid1] = marks();
       expect(best1).not.toBe(best0);
       expect(best1?.getAttribute("data-changes")).toBe("1");
       expect([far1, bid1]).toEqual([far0, bid0]);
 
-      rerender(<OrderBook book={book(700)} market={market} />);
+      rerender(<OrderBook book={book(700)} market={market} lastTrade={null} />);
       const [far2, best2, bid2] = marks();
       expect(best2).not.toBe(best1);
       expect(best2?.getAttribute("data-changes")).toBe("2");
       expect([far2, bid2]).toEqual([far0, bid0]);
+    });
+  });
+
+  describe("last trade", () => {
+    const slot = () => {
+      const bar = screen.getByRole("rowgroup", { name: "Spread" });
+      const found = bar.querySelector("[data-last-trade]");
+      if (!found) throw new Error("no last-trade slot");
+      return found;
+    };
+    const renderWith = (lastTrade: LastTrade | null) =>
+      render(
+        <OrderBook
+          book={bookOf(snapshot())}
+          market={market}
+          lastTrade={lastTrade}
+        />,
+      );
+
+    // Stylesheets are not loaded in tests, so the color rule is checked
+    // through the attribute it selects on.
+    it("shows a buy as an up arrow on the bid side", () => {
+      renderWith({ price: 1_000_020, side: "buy" });
+      expect(slot()).toHaveTextContent("Last ▲100,002.0 buyer");
+      expect(slot().querySelector("[data-side='buy']")).not.toBeNull();
+    });
+
+    it("shows a sell as a down arrow on the ask side", () => {
+      renderWith({ price: 999_990, side: "sell" });
+      expect(slot()).toHaveTextContent("Last ▼99,999.0 seller");
+      expect(slot().querySelector("[data-side='sell']")).not.toBeNull();
+    });
+
+    it("keeps its slot, empty, before the first trade", () => {
+      renderWith(null);
+      expect(slot()).toBeEmptyDOMElement();
     });
   });
 });

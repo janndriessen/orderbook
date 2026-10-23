@@ -2,7 +2,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { accepted, snapshot } from "./test/fixtures";
+import { accepted, snapshot, trade } from "./test/fixtures";
 import { stubViewport } from "./test/layout";
 
 class FakeWebSocket {
@@ -44,6 +44,13 @@ describe("App", () => {
     expect(
       screen.getByRole("region", { name: "BTC-USD order book" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows the last trade from the feed in the spread bar", () => {
+    render(<App />);
+    deliver(snapshot({ events: [trade(1, "buy", 1_000_020)] }));
+    const bar = within(screen.getByRole("rowgroup", { name: "Spread" }));
+    expect(bar.getByText(/100,002\.0/)).toHaveTextContent("buyer");
   });
 
   it("opens and closes the flow log from the toggle", async () => {

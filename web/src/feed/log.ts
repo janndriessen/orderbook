@@ -1,5 +1,6 @@
 import type { Envelope } from "../protocol/Envelope";
 import type { Event } from "../protocol/Event";
+import type { Side } from "../protocol/Side";
 
 /** Order-flow events shown in the log; book diffs are not part of it. */
 export type FlowEvent = Exclude<Event, { type: "l2_update" }>;
@@ -36,4 +37,19 @@ export function matchesFilter(entry: LogEntry, filter: LogFilter): boolean {
     case "orders":
       return entry.body.type !== "trade";
   }
+}
+
+/** Price and taker side of a trade. */
+export type LastTrade = { price: number; side: Side };
+
+/** The newest trade in events given oldest first, if there is one. */
+export function newestTrade(
+  events: readonly Envelope<Event>[],
+): LastTrade | null {
+  for (const { body } of events.toReversed()) {
+    if (body.type === "trade") {
+      return { price: body.price, side: body.aggressor_side };
+    }
+  }
+  return null;
 }

@@ -32,14 +32,6 @@
   border: 0;
 }
 
-.legend {
-  position: absolute;
-  width: var(--border-width);
-  height: var(--border-width);
-  overflow: hidden;
-  clip-path: inset(50%);
-}
-
 .filter {
   position: relative;
 }

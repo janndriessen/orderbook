@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { accepted, canceled, l2, replaced, trade } from "../test/fixtures";
-import { appendEvents, MAX_LOG_ENTRIES, matchesFilter } from "./log";
+import {
+  appendEvents,
+  MAX_LOG_ENTRIES,
+  matchesFilter,
+  newestTrade,
+} from "./log";
 
 describe("appendEvents", () => {
   it("puts the newest event first", () => {
@@ -45,5 +50,21 @@ describe("matchesFilter", () => {
     expect(pick("all")).toEqual([1, 2, 3, 4]);
     expect(pick("trades")).toEqual([2]);
     expect(pick("orders")).toEqual([1, 3, 4]);
+  });
+});
+
+describe("newestTrade", () => {
+  it("is the newest trade of events given oldest first, with its taker side", () => {
+    const events = [
+      trade(1, "sell", 999_000),
+      accepted(2),
+      trade(3, "buy", 1_001_000),
+      accepted(4),
+    ];
+    expect(newestTrade(events)).toEqual({ price: 1_001_000, side: "buy" });
+  });
+
+  it("is null without a trade", () => {
+    expect(newestTrade([accepted(1)])).toBeNull();
   });
 });

@@ -6,6 +6,7 @@ import {
   matchesFilter,
 } from "../../feed/log";
 import type { MarketInfo } from "../../protocol/MarketInfo";
+import hidden from "../../styles/a11y.module.css";
 import { FlowEntry } from "./FlowEntry";
 import styles from "./FlowLog.module.css";
 
@@ -63,7 +64,7 @@ export function FlowLog({ entries, market, restarts = 0 }: Props) {
     <div className={styles.log}>
       <header className={styles.toolbar}>
         <fieldset className={styles.filters}>
-          <legend className={styles.legend}>Show</legend>
+          <legend className={hidden.visuallyHidden}>Show</legend>
           {FILTERS.map(({ value, label }) => (
             <label key={value} className={styles.filter}>
               <input

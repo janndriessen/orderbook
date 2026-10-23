@@ -7,7 +7,7 @@ import { OrderBook } from "./components/OrderBook/OrderBook";
 import { useFeed } from "./feed/useFeed";
 
 export function App() {
-  const { status, book, market, log, restarts } = useFeed();
+  const { status, book, market, log, lastTrade, restarts } = useFeed();
   const [logOpen, setLogOpen] = useState(false);
 
   return (
@@ -16,7 +16,7 @@ export function App() {
       <main className={styles.bookPane}>
         <div className={styles.bookSlot}>
           {book && market ? (
-            <OrderBook book={book} market={market} />
+            <OrderBook book={book} market={market} lastTrade={lastTrade} />
           ) : (
             <p className={styles.waiting}>Waiting for the feed</p>
           )}

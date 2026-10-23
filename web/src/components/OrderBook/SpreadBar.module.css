@@ -3,11 +3,32 @@
   background: var(--color-surface);
 }
 
+/* The spread sits in the middle column and the last trade in the right one,
+   whether or not there is a trade yet, so neither ever moves. */
 .content {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: baseline;
+}
+
+.spread {
   display: flex;
   align-items: baseline;
-  justify-content: center;
   gap: var(--space-2);
+  grid-column: 2;
+}
+
+.last {
+  grid-column: 3;
+  justify-self: end;
+}
+
+.last [data-side="buy"] {
+  color: var(--color-bid);
+}
+
+.last [data-side="sell"] {
+  color: var(--color-ask);
 }
 
 .label {

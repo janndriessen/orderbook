@@ -9,6 +9,7 @@ import {
   SILENCE_TIMEOUT_MS,
   type Transport,
 } from "./FeedHandler";
+import { MAX_LOG_ENTRIES } from "./log";
 
 type FakeSocket = {
   closed: boolean;
@@ -402,6 +403,59 @@ describe("FeedHandler", () => {
     expect(handler.getState()).toMatchObject({
       status: "connecting",
       market: null,
+    });
+  });
+
+  describe("last trade", () => {
+    it("is null before any trade and follows the newest trade", () => {
+      const { handler, last } = setup();
+      handler.start();
+      last().send(wire(snapshot({ seq: 1 })));
+      expect(handler.getState().lastTrade).toBeNull();
+
+      last().send(
+        wire(update({ seq: 2, events: [trade(2, "buy", 1_000_010)] })),
+      );
+      expect(handler.getState().lastTrade).toEqual({
+        price: 1_000_010,
+        side: "buy",
+      });
+    });
+
+    it("survives more later events than the log keeps", () => {
+      const { handler, last } = setup();
+      handler.start();
+      last().send(wire(snapshot({ seq: 1 })));
+      last().send(
+        wire(update({ seq: 2, events: [trade(2, "sell", 999_990)] })),
+      );
+      const flood = Array.from({ length: MAX_LOG_ENTRIES + 1 }, (_, i) =>
+        accepted(3 + i),
+      );
+      last().send(wire(update({ seq: 3, events: flood })));
+      expect(handler.getState().log.some((e) => e.body.type === "trade")).toBe(
+        false,
+      );
+      expect(handler.getState().lastTrade).toEqual({
+        price: 999_990,
+        side: "sell",
+      });
+    });
+
+    it("stays through a reconnect until a newer trade arrives", () => {
+      const { handler, last, waitForReconnect } = setup();
+      handler.start();
+      last().send(wire(snapshot({ seq: 1 })));
+      last().send(
+        wire(update({ seq: 2, events: [trade(2, "sell", 999_990)] })),
+      );
+      last().drop();
+      waitForReconnect();
+      last().send(wire(snapshot({ seq: 5 })));
+      expect(handler.getState().lastTrade).toEqual({
+        price: 999_990,
+        side: "sell",
+      });
     });
   });
 });
