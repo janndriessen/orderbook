@@ -21,8 +21,8 @@
   --color-bid: #38cfae;
   --color-ask: #f2627e;
   --depth-strength: 17%;
-  /* Peak tint of a level whose size just changed. */
-  --flash-strength: 40%;
+  /* Peak tint of a level new to the book. */
+  --flash-tint: 28%;
   --color-bid-depth: color-mix(
     in srgb,
     var(--color-bid) var(--depth-strength),
@@ -93,7 +93,9 @@
   /* Motion. Reduced-motion users get instant changes through the duration. */
   --duration-pane: 520ms;
   --duration-fast: 140ms;
-  --duration-flash: 300ms;
+  --duration-flash: 800ms;
+  /* Delay between flash slots; a row waits its slot's step count times this. */
+  --flash-step: 50ms;
   --duration-pulse: 1.2s;
   --pulse-low-opacity: 0.3;
   --ease-pane: cubic-bezier(0.65, 0, 0.2, 1);
@@ -105,6 +107,7 @@
     --duration-pane: 0ms;
     --duration-fast: 0ms;
     --duration-flash: 0ms;
+    --flash-step: 0ms;
     --duration-pulse: 0s;
   }
 }

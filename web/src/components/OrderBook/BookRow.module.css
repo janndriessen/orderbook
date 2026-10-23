@@ -26,21 +26,27 @@
   text-align: left;
 }
 
-/* Plays once per mount and ends on transparent, so it leaves no trace. */
-.flash {
-  animation: flash var(--duration-flash) var(--ease-out);
+/* A tint over the whole row in the side's color, playing once per mount: it
+   rises to its peak fast, fades out, and ends on transparent so it leaves no
+   trace. It sits on the cells because a table row cannot hold an overlay of
+   its own. Before the delay the row stays untinted. */
+.flash > td {
+  animation: flash var(--duration-flash) ease
+    calc(var(--flash-step-index) * var(--flash-step));
 }
 
 @keyframes flash {
-  from {
-    background: color-mix(
-      in srgb,
-      var(--side-color) var(--flash-strength),
-      transparent
-    );
+  0%,
+  100% {
+    background-color: transparent;
   }
 
-  to {
-    background: transparent;
+  /* Keyframe offsets cannot be tokens. */
+  20% {
+    background-color: color-mix(
+      in srgb,
+      var(--side-color) var(--flash-tint),
+      transparent
+    );
   }
 }

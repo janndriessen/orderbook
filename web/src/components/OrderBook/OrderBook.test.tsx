@@ -1,5 +1,6 @@
-import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { act, render, screen, within } from "@testing-library/react";
+import { StrictMode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMessage, type BookState } from "../../feed/book";
 import type { LastTrade } from "../../feed/log";
 import { level, market, snapshot } from "../../test/fixtures";
@@ -192,54 +193,138 @@ describe("OrderBook", () => {
     }
   });
 
-  describe("size flash", () => {
-    const book = (bestAskQty: number) =>
+  describe("flash on new levels", () => {
+    const view = (book: BookState) => (
+      <OrderBook book={book} market={market} lastTrade={null} />
+    );
+    const run = (bids: number[], asks: number[] = [], qty = 1_000) =>
       bookOf(
         snapshot({
-          asks: [level(1_000_050, bestAskQty), level(1_000_100, 2_500)],
-          bids: [level(1_000_000, 1_000)],
+          bids: bids.map((p) => level(p, qty)),
+          asks: asks.map((p) => level(p, qty)),
         }),
       );
-    // Asks render furthest first, so the best ask is the second row.
-    const marks = () =>
-      screen
+    // Delay step per row, best first, as the row hands it to the stylesheet;
+    // null where the row does not flash.
+    const steps = (name: string) =>
+      within(screen.getByRole("rowgroup", { name }))
         .getAllByRole("row")
-        .filter((row) => within(row).queryAllByRole("cell").length === 3)
-        .map((row) => row.querySelector("[data-changes]"));
+        .map((row) => row.style.getPropertyValue("--flash-step-index"))
+        .map((step) => (step === "" ? null : Number(step)));
+    const rowCountOf = (name: string) =>
+      within(screen.getByRole("rowgroup", { name })).getAllByRole("row").length;
 
-    it("does not flash on first appearance or when nothing changed", () => {
-      const { rerender } = render(
-        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
-      );
-      const first = marks();
-      expect(first.map((m) => m?.getAttribute("data-changes"))).toEqual([
-        "0",
-        "0",
-        "0",
-      ]);
-      rerender(
-        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
-      );
-      expect(marks()).toEqual(first);
+    it("does not flash the first book", () => {
+      render(view(run([1_000, 999], [1_001, 1_002])));
+      expect(steps("Bids")).toEqual([null, null]);
+      expect(steps("Asks")).toEqual([null, null]);
     });
 
-    it("restarts the flash of the changed level on every change, and only there", () => {
-      const { rerender } = render(
-        <OrderBook book={book(1_500)} market={market} lastTrade={null} />,
+    it("flashes only the price that was not in the previous book", () => {
+      const { rerender } = render(view(run([1_000, 999], [1_001, 1_002])));
+      rerender(view(run([1_000, 999, 998], [1_001, 1_002, 1_003])));
+      expect(steps("Bids")).toEqual([null, null, 4]);
+      expect(steps("Asks")).toEqual([4, null, null]);
+    });
+
+    it("does not flash a size change", () => {
+      const { rerender } = render(view(run([1_000, 999], [1_001])));
+      rerender(view(run([1_000, 999], [1_001], 5_000)));
+      expect(steps("Bids")).toEqual([null, null]);
+      expect(steps("Asks")).toEqual([null]);
+    });
+
+    it("steps each slot by its place in the scattered order", () => {
+      const { rerender } = render(view(run([1_000])));
+      const prices = Array.from({ length: 12 }, (_, i) => 1_000 - i);
+      rerender(view(run(prices)));
+      const order = [0, 8, 4, 3, 2, 5, 7, 1, 9, 6];
+      const expected = prices.map((_, slot) =>
+        slot === 0 ? null : (order[slot % 10] ?? 0),
       );
-      const [far0, best0, bid0] = marks();
+      expect(steps("Bids")).toEqual(expected);
+    });
 
-      rerender(<OrderBook book={book(900)} market={market} lastTrade={null} />);
-      const [far1, best1, bid1] = marks();
-      expect(best1).not.toBe(best0);
-      expect(best1?.getAttribute("data-changes")).toBe("1");
-      expect([far1, bid1]).toEqual([far0, bid0]);
+    it("keeps a level's flash while later updates arrive", () => {
+      const { rerender } = render(view(run([1_000])));
+      rerender(view(run([1_000, 999])));
+      rerender(view(run([1_000, 999], [], 2_000)));
+      expect(steps("Bids")).toEqual([null, 8]);
+    });
 
-      rerender(<OrderBook book={book(700)} market={market} lastTrade={null} />);
-      const [far2, best2, bid2] = marks();
-      expect(best2).not.toBe(best1);
-      expect(best2?.getAttribute("data-changes")).toBe("2");
-      expect([far2, bid2]).toEqual([far0, bid0]);
+    it("keeps a row's step when its slot shifts", () => {
+      const { rerender } = render(view(run([1_000])));
+      rerender(view(run([1_000, 999])));
+      // 999 moves from slot 1 to slot 2 but keeps the step it started with.
+      rerender(view(run([1_001, 1_000, 999])));
+      expect(steps("Bids")).toEqual([0, null, 8]);
+    });
+
+    it("flashes a new price exactly once under StrictMode", () => {
+      const { rerender } = render(
+        <StrictMode>{view(run([1_000], [1_005]))}</StrictMode>,
+      );
+      rerender(<StrictMode>{view(run([1_001, 1_000], [1_005]))}</StrictMode>);
+      expect(steps("Bids")).toEqual([0, null]);
+      expect(steps("Asks")).toEqual([null]);
+    });
+
+    it("does not flash a price that was on the other side before", () => {
+      const { rerender } = render(view(run([1_001, 1_000], [1_002])));
+      rerender(view(run([1_000], [1_001, 1_002])));
+      expect(steps("Asks")).toEqual([null, null]);
+    });
+
+    it("flashes a price that left the book and came back", () => {
+      const { rerender } = render(view(run([1_000, 999, 998])));
+      rerender(view(run([1_000, 999])));
+      rerender(view(run([1_000, 999, 998])));
+      expect(steps("Bids")).toEqual([null, null, 4]);
+    });
+
+    it("still flashes a price that is new to the whole book", () => {
+      stubViewport(80);
+      const { rerender } = render(view(run([1_000, 999], [1_005])));
+      rerender(view(run([1_001, 1_000, 999], [1_005])));
+      expect(steps("Bids")).toEqual([0]);
+    });
+
+    it("does not flash rows revealed by a taller panel", () => {
+      // 20 + 20 fixed, then 2 rows of 20 px: one per side.
+      stubViewport(80);
+      let resize = () => {};
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          constructor(callback: () => void) {
+            resize = callback;
+          }
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        },
+      );
+      render(view(run([1_000, 999, 998], [1_001, 1_002, 1_003])));
+      expect(steps("Bids")).toEqual([null]);
+
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(
+        1_000,
+      );
+      act(() => resize());
+      expect(rowCountOf("Bids")).toBe(3);
+      expect(steps("Bids")).toEqual([null, null, null]);
+      expect(steps("Asks")).toEqual([null, null, null]);
+    });
+
+    it("does not flash a level that moves into view from deeper in the book", () => {
+      stubViewport(80);
+      const { rerender } = render(view(run([1_000, 999, 998], [1_001, 1_002])));
+      expect(steps("Bids")).toEqual([null]);
+      // The best bid goes; 999 was already in the book, just out of sight.
+      rerender(view(run([999, 998], [1_001, 1_002])));
+      expect(steps("Bids")).toEqual([null]);
+      rerender(view(run([998], [1_001, 1_002])));
+      expect(steps("Bids")).toEqual([null]);
     });
   });
 

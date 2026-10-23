@@ -11,11 +11,20 @@ type Props = {
   /** Rows the side occupies; unused ones stay empty so the spread stays put. */
   slots: number;
   maxTotal: number;
+  /** Every price of the previous book; `null` when nothing may flash. */
+  known: ReadonlySet<number> | null;
   market: MarketInfo;
 };
 
-export function BookSide({ side, rows, slots, maxTotal, market }: Props) {
-  const rendered = rows.map((row) => (
+export function BookSide({
+  side,
+  rows,
+  slots,
+  maxTotal,
+  known,
+  market,
+}: Props) {
+  const rendered = rows.map((row, slot) => (
     <BookRow
       key={row.price}
       side={side}
@@ -23,6 +32,8 @@ export function BookSide({ side, rows, slots, maxTotal, market }: Props) {
       qty={row.qty}
       total={row.total}
       maxTotal={maxTotal}
+      isNew={known !== null && !known.has(row.price)}
+      slot={slot}
       market={market}
     />
   ));

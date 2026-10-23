@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { type BookState, topRows } from "../../feed/book";
 import type { LastTrade } from "../../feed/log";
 import type { MarketInfo } from "../../protocol/MarketInfo";
@@ -33,6 +33,21 @@ export function OrderBook({ book, market, lastTrade }: Props) {
     return { asks, bids, largest };
   }, [book.asks, book.bids, slots]);
 
+  // Every price of the book, visible or not. A row flashes only if its price
+  // was not in the previous book, so a taller panel or a vanished better
+  // level never lights up a price that was already there. The previous book is
+  // kept as state adjusted during render, which a repeated render sees the
+  // same way.
+  const prices = useMemo(
+    () => new Set([...book.asks.keys(), ...book.bids.keys()]),
+    [book.asks, book.bids],
+  );
+  const [seen, setSeen] = useState<{
+    prices: ReadonlySet<number>;
+    previous: ReadonlySet<number> | null;
+  }>({ prices, previous: null });
+  if (seen.prices !== prices) setSeen({ prices, previous: seen.prices });
+
   return (
     <section
       ref={ref}
@@ -52,6 +67,7 @@ export function OrderBook({ book, market, lastTrade }: Props) {
           rows={asks}
           slots={slots}
           maxTotal={largest}
+          known={seen.previous}
           market={market}
         />
         <SpreadBar
@@ -65,6 +81,7 @@ export function OrderBook({ book, market, lastTrade }: Props) {
           rows={bids}
           slots={slots}
           maxTotal={largest}
+          known={seen.previous}
           market={market}
         />
       </table>

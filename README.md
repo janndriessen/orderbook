@@ -31,7 +31,7 @@ The book is a panel of up to 20 rows per side around a spread bar that stays put
 A side with fewer levels keeps its slots and leaves its far end blank.
 On a window too short for 20 rows per side, the panel shows as many as fit.
 Numbers and depth bars change at once, without easing.
-A level whose size changes flashes briefly.
+A price that was not anywhere in the previous book (visible or not) flashes in its side color, each row after its own short delay so a batch lights up in a scattered order. There is no flash for the first book or for a size change, and none under reduced motion, where the duration tokens shrink it to nothing.
 The spread bar shows the last trade price with an arrow for the taker side, in the bid color for a buy and the ask color for a sell.
 A toggle opens the flow log beside it, with filtering and pause.
 The log is ready to show rejected orders and refused cancels and replaces; the random-walk order flow never provokes them.
