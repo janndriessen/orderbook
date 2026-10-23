@@ -12,6 +12,7 @@ futures-util.workspace = true
 # Only switches rustls's ring crypto provider on; it is never called directly.
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing.workspace = true
