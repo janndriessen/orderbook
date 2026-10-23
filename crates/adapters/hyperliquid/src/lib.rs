@@ -8,11 +8,13 @@
 
 mod decimal;
 mod l2;
+mod merge;
 mod message;
 mod translate;
 
 pub use decimal::DecimalError;
 pub use l2::{L2Decoder, L2Error, WireL2, WireL2Change, WireL2Level};
+pub use merge::{Grouping, MergeError, Merged, merge};
 pub use message::{
     BookLevel, BookSnapshot, ConvertError, Message, Trade, TradeSide, WireBbo, WireBook, WireLevel,
     WireTrade,
