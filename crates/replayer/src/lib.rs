@@ -310,6 +310,8 @@ struct Scan<'a> {
 /// The `subscription` the recorder adds to every `l2` line, read apart from
 /// the message because the adapter's message type does not carry it. `c` is
 /// the coin, `s` the significant figures and `m` the mantissa, absent for 1.
+/// Without `s` (absent or null) the subscription names no rounding: the
+/// grouping of single ticks.
 #[derive(serde::Deserialize)]
 struct SubscribedLine {
     subscription: Subscription,
@@ -318,7 +320,7 @@ struct SubscribedLine {
 #[derive(serde::Deserialize)]
 struct Subscription {
     c: String,
-    s: u32,
+    s: Option<u32>,
     m: Option<u32>,
 }
 
@@ -427,7 +429,7 @@ fn mismatch(line: usize) -> LoadError {
 /// The headers are read first: a recording with `l2` lines is replayed from
 /// them alone, any other from the documented book feeds.
 ///
-/// With `l2` lines (the recorder's six price groupings, each line carrying its
+/// With `l2` lines (the recorder's price groupings, each line carrying its
 /// `subscription`), one decoder per grouping keeps its book. A push is
 /// complete when every grouping in the recording has a book at exactly that
 /// time, and the groupings of a complete push are merged into one full
@@ -1481,7 +1483,7 @@ mod tests {
         let ask = [(81_001, "1.0")];
         let bad = [
             good.replace(r#","subscription":{"c":"BTC","s":5,"type":"l2"}"#, ""),
-            good.replace(r#""s":5,"#, ""),
+            good.replace(r#""s":5,"#, r#""m":2,"#),
             good.replace(r#""s":5,"#, r#""s":"5","#),
             l2_line(7, None, 1_000, &bare, &ask),
             l2_line(4, Some(2), 1_000, &bare, &ask),
@@ -1498,8 +1500,43 @@ mod tests {
     }
 
     #[test]
+    fn a_subscription_without_s_is_the_grouping_without_rounding() {
+        // The same book as the $1 grouping, so a recording of it with either
+        // spelling of "no rounding" gives the commands the $1 one does.
+        let expected = load_lines(&both(1_000, "1.0")).expect("loads");
+        for none in ["", r#""s":null,"#] {
+            let exact = fine(1_000, "1.0").replace(r#""s":5,"#, none);
+            assert_ne!(exact, fine(1_000, "1.0"));
+            let loaded = load_lines(&[exact, coarse(1_000, "1.0")]).expect("loads");
+            assert_eq!(loaded.commands, expected.commands, "{none}");
+            assert_eq!(loaded.failed_merges, 0);
+            assert_eq!(loaded.conflicting_qty, 0);
+        }
+    }
+
+    #[test]
+    fn the_grouping_without_rounding_is_one_more_grouping_a_push_needs() {
+        let exact = |time| fine(time, "1.0").replace(r#""s":5,"#, "");
+        // At 1,500 the exact grouping sends nothing, so that push is
+        // incomplete although the other two groupings sent it.
+        let lines = [
+            exact(1_000),
+            fine(1_000, "1.0"),
+            coarse(1_000, "1.0"),
+            fine(1_500, "1.0"),
+            coarse(1_500, "1.0"),
+            exact(2_000),
+            fine(2_000, "1.0"),
+            coarse(2_000, "1.0"),
+        ];
+        let loaded = load_lines(&lines).expect("loads");
+        assert_eq!(loaded.skipped_pushes, 1);
+        assert_eq!(loaded.failed_merges, 0);
+    }
+
+    #[test]
     fn a_bad_subscription_and_a_bad_trade_are_reported_in_line_order() {
-        let bad_subscription = fine(1_000, "1.0").replace(r#""s":5,"#, "");
+        let bad_subscription = fine(1_000, "1.0").replace(r#""s":5,"#, r#""s":"5","#);
         let bad_trade = trade_line(1_500, "B", 81_001).replace("BTC", "ETH");
         let err = load_lines(&[
             fine(1_000, "1.0"),

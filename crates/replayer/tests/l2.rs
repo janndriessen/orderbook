@@ -48,7 +48,10 @@ fn pushes() -> BTreeMap<u64, BTreeMap<Grouping, BookSnapshot>> {
         let subscription = &line["subscription"];
         let sig_figs = subscription["s"].as_u64().expect("s") as u32;
         let mantissa = subscription["m"].as_u64().unwrap_or(1) as u32;
-        let key = Grouping { sig_figs, mantissa };
+        let key = Grouping {
+            sig_figs: Some(sig_figs),
+            mantissa,
+        };
         let Message::L2(wire) = serde_json::from_str(text).expect("l2 message") else {
             panic!("not an l2 message");
         };
@@ -119,6 +122,7 @@ fn the_matcher_shows_every_complete_push_and_every_grouping_of_it() {
         let best_bid = *bids.keys().next_back().expect("a bid");
         let digits = best_bid.ilog10() + 1;
         for (&Grouping { sig_figs, mantissa }, view) in group {
+            let sig_figs = sig_figs.expect("the fixture has no grouping without rounding");
             let width = 10_i64.pow(digits - sig_figs) * Price::from(mantissa);
             assert_eq!(
                 bucketed(&bids, Side::Buy, width),

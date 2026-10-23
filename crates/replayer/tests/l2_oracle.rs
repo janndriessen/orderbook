@@ -59,7 +59,7 @@ fn complete_pushes() -> BTreeMap<u64, Views> {
         }
         let subscription = &line["subscription"];
         let key = Grouping {
-            sig_figs: subscription["s"].as_u64().expect("s") as u32,
+            sig_figs: Some(subscription["s"].as_u64().expect("s") as u32),
             mantissa: subscription["m"].as_u64().unwrap_or(1) as u32,
         };
         let Message::L2(wire) = serde_json::from_str(text).expect("l2 message") else {
@@ -108,6 +108,7 @@ fn check_book(bids: &Levels, asks: &Levels, views: &Views, ts: u64) {
     // One bucket width per book, from the number of digits of the best bid.
     let digits = bids.keys().next_back().expect("a bid").ilog10() + 1;
     for (&Grouping { sig_figs, mantissa }, view) in views {
+        let sig_figs = sig_figs.expect("the fixture has no grouping without rounding");
         let width = 10_i64.pow(digits - sig_figs) * Price::from(mantissa);
         assert_eq!(
             bucketed(bids, Side::Buy, width),

@@ -11,11 +11,15 @@
 //! The `l2` feed, which Hyperliquid's web app uses and its API documentation
 //! does not list, sends 20 levels per side about every half second, at one
 //! price grouping per subscription. All six groupings the app offers for BTC
-//! are recorded. No `l2` message says which grouping it is for, so each one
-//! gets its own connection (six in all, within the limit of ten per address on
+//! are recorded, and a seventh: the subscription with no `s` at all, whose
+//! buckets stay one tick wide at any price, where five figures turn $10 wide
+//! from $100,000 on (the app uses it for its finest option there). No `l2`
+//! message says which grouping it is for, so each one gets its own connection
+//! (seven in all, within the limit of ten per address on
 //! <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits>),
 //! and the recorder adds a `subscription` field to every `l2` line: the
-//! subscription it sent on that connection. An `l2` message that already has
+//! subscription it sent on that connection (without `s` for the seventh). An
+//! `l2` message that already has
 //! such a field ends the run rather than lose what the source sent.
 //!
 //! Every message is parsed and written back re-serialized (keys sorted), with
@@ -28,7 +32,7 @@
 //! - no full book snapshot (more than 5 levels on a side) arrives on the main
 //!   connection for 30 seconds, which catches a stalled standard feed that the
 //!   fast feed would otherwise hide, and a silent main connection with it;
-//! - no `l2` message arrives on one of the six connections for 30 seconds.
+//! - no `l2` message arrives on one of the seven connections for 30 seconds.
 //!
 //! Acknowledgements, `pong` replies and `error` messages count as no progress.
 //!
@@ -67,23 +71,28 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 /// The most levels per side that a top-of-book snapshot carries.
 const TOP_DEPTH: usize = 5;
 
-/// The `l2` price groupings the web app offers for BTC, finest first, as
-/// significant figures and an optional mantissa: $1, $2, $5, $10, $100 and
-/// $1,000 at current prices. Connection `i` carries grouping `i`.
-const GROUPINGS: [(u8, Option<u8>); 6] = [
-    (5, None),
-    (5, Some(2)),
-    (5, Some(5)),
-    (4, None),
-    (3, None),
-    (2, None),
+/// The `l2` price groupings, as optional significant figures and an optional
+/// mantissa: the six the web app offers for BTC ($1, $2, $5, $10, $100 and
+/// $1,000 at current prices, finest first) and, last, the one without
+/// rounding. Connection `i` carries grouping `i`.
+const GROUPINGS: [(Option<u8>, Option<u8>); 7] = [
+    (Some(5), None),
+    (Some(5), Some(2)),
+    (Some(5), Some(5)),
+    (Some(4), None),
+    (Some(3), None),
+    (Some(2), None),
+    (None, None),
 ];
 
 /// The `l2` subscription for one grouping, as sent and as written into its
 /// lines.
 fn l2_subscription(grouping: usize) -> Value {
     let (figures, mantissa) = GROUPINGS[grouping];
-    let mut subscription = json!({"type": "l2", "c": "BTC", "s": figures});
+    let mut subscription = json!({"type": "l2", "c": "BTC"});
+    if let Some(figures) = figures {
+        subscription["s"] = json!(figures);
+    }
     if let Some(mantissa) = mantissa {
         subscription["m"] = json!(mantissa);
     }
@@ -383,7 +392,32 @@ mod tests {
                 vec![json!({"type": "l2", "c": "BTC", "s": 4})],
                 vec![json!({"type": "l2", "c": "BTC", "s": 3})],
                 vec![json!({"type": "l2", "c": "BTC", "s": 2})],
+                vec![json!({"type": "l2", "c": "BTC"})],
             ]
+        );
+    }
+
+    #[test]
+    fn the_last_connection_subscribes_without_rounding_and_is_tagged_without_s() {
+        let last = GROUPINGS.len() - 1;
+        assert_eq!(subscriptions(last), vec![json!({"type": "l2", "c": "BTC"})]);
+        let mut change = json!({"channel": "l2", "data": {"c": "abc"}});
+        tag(&mut change, last).expect("tags");
+        assert_eq!(
+            change["subscription"],
+            json!({"type": "l2", "c": "BTC"}),
+            "no s key, not a null one"
+        );
+        // Its silence is named like any other connection's.
+        let start = Instant::now();
+        let mut deadlines = Deadlines::new(start);
+        deadlines.note(0, &Received::FullBook, start + IDLE_LIMIT / 2);
+        for connection in 0..last {
+            deadlines.note(connection, &Received::L2, start + IDLE_LIMIT / 2);
+        }
+        assert_eq!(
+            deadlines.missed(start + IDLE_LIMIT).as_deref(),
+            Some(r#"no l2 message for {"c":"BTC","type":"l2"}"#)
         );
     }
 
@@ -439,7 +473,7 @@ mod tests {
                 .expect("connects");
             sockets.push(socket);
         }
-        <[Socket; GROUPINGS.len()]>::try_from(sockets).unwrap_or_else(|_| panic!("six sockets"))
+        <[Socket; GROUPINGS.len()]>::try_from(sockets).unwrap_or_else(|_| panic!("seven sockets"))
     }
 
     #[tokio::test]
@@ -471,7 +505,7 @@ mod tests {
         let later = start + IDLE_LIMIT / 2;
         // Every connection but number 2 sends l2, and the main one sends a
         // full book; number 2 still runs out at the first limit.
-        for connection in [0, 1, 3, 4, 5] {
+        for connection in [0, 1, 3, 4, 5, 6] {
             deadlines.note(connection, &Received::L2, later);
         }
         deadlines.note(0, &Received::FullBook, later);

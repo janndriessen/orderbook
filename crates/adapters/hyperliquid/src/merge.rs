@@ -33,7 +33,8 @@
 //! ten to itself, so its label is taken as it is. Which price the
 //! source uses only matters when the touch is next to a change in the number
 //! of digits, and that has not been observed. Bids are labeled by rounding
-//! down and asks by rounding up, measured exactly on recorded data. Prices are
+//! down and asks by rounding up, measured exactly on recorded data. The
+//! subscription without rounding lists single ticks at any price. Prices are
 //! whole ticks of $1, as the BTC market's are.
 
 use protocol::{Price, Ts};
@@ -48,35 +49,54 @@ const WINDOW: usize = 20;
 /// One price grouping of the `l2` feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Grouping {
-    /// Significant figures the reference price is rounded to, 2 to 5.
-    pub sig_figs: u32,
+    /// Significant figures the reference price is rounded to, 2 to 5, or
+    /// `None` for the subscription that names no rounding at all: its
+    /// buckets are single ticks at any price, which is the finest the source
+    /// shows (five figures turn $10 wide from $100,000 on).
+    pub sig_figs: Option<u32>,
     /// Multiple of the rounded unit a bucket spans: 1, or 2 or 5 at five
-    /// significant figures, as the source offers them.
+    /// significant figures, as the source offers them; 1 without rounding.
     pub mantissa: u32,
 }
 
 impl Grouping {
-    /// Whether the source offers this grouping: 2 to 4 significant figures
-    /// with a mantissa of 1, or 5 with a mantissa of 1, 2 or 5.
+    /// The grouping with no rounding: single-tick buckets, the finest.
+    pub const EXACT: Self = Self {
+        sig_figs: None,
+        mantissa: 1,
+    };
+
+    /// Whether the source offers this grouping: no rounding with a mantissa
+    /// of 1, 2 to 4 significant figures with a mantissa of 1, or 5 with a
+    /// mantissa of 1, 2 or 5.
     pub fn is_offered(self) -> bool {
-        matches!((self.sig_figs, self.mantissa), (2..=4, 1) | (5, 1 | 2 | 5))
+        matches!(
+            (self.sig_figs, self.mantissa),
+            (None, 1) | (Some(2..=4), 1) | (Some(5), 1 | 2 | 5)
+        )
     }
 
     /// The width of this grouping's buckets, in ticks, for a book whose
     /// reference price is `reference`. With prices below 2^53 (16 digits) and
     /// at least 2 significant figures, it stays below 5 * 10^14.
     fn width(self, reference: Price) -> Price {
+        let Some(sig_figs) = self.sig_figs else {
+            return 1;
+        };
         let digits = reference
             .unsigned_abs()
             .checked_ilog10()
             .map_or(1, |log| log + 1);
-        10_i64.pow(digits.saturating_sub(self.sig_figs)) * Price::from(self.mantissa)
+        10_i64.pow(digits.saturating_sub(sig_figs)) * Price::from(self.mantissa)
     }
 
-    /// Finer groupings sort first: more significant figures, then a smaller
-    /// mantissa.
+    /// Finer groupings sort first: no rounding, then more significant
+    /// figures, then a smaller mantissa.
     fn fineness(self) -> (std::cmp::Reverse<u32>, u32) {
-        (std::cmp::Reverse(self.sig_figs), self.mantissa)
+        (
+            std::cmp::Reverse(self.sig_figs.unwrap_or(u32::MAX)),
+            self.mantissa,
+        )
     }
 }
 
@@ -193,13 +213,17 @@ pub fn merge(groupings: &[(Grouping, &BookSnapshot)]) -> Result<Merged, MergeErr
     let best_ask = by_fineness
         .iter()
         .find_map(|(grouping, book)| book.asks.first().map(|ask| (*grouping, ask.price)));
-    let exact = Grouping {
-        sig_figs: 5,
+    let five_figures = Grouping {
+        sig_figs: Some(5),
         mantissa: 1,
     };
     let reference = match (best_bid, best_ask) {
         (Some(bid), _) => bid.price,
-        (None, Some((grouping, ask))) if grouping != exact && is_power_of_ten(ask) => ask - 1,
+        (None, Some((grouping, ask)))
+            if grouping != five_figures && grouping != Grouping::EXACT && is_power_of_ten(ask) =>
+        {
+            ask - 1
+        }
         (None, Some((_, ask))) => ask,
         (None, None) => 1,
     };
@@ -342,7 +366,10 @@ mod tests {
     use crate::{L2Decoder, Message};
 
     const fn grouping(sig_figs: u32, mantissa: u32) -> Grouping {
-        Grouping { sig_figs, mantissa }
+        Grouping {
+            sig_figs: Some(sig_figs),
+            mantissa,
+        }
     }
 
     const ONE: Grouping = grouping(5, 1);
@@ -351,7 +378,8 @@ mod tests {
     const TEN: Grouping = grouping(4, 1);
     const HUNDRED: Grouping = grouping(3, 1);
     const THOUSAND: Grouping = grouping(2, 1);
-    const ALL: [Grouping; 6] = [ONE, TWO, FIVE, TEN, HUNDRED, THOUSAND];
+    const EXACT: Grouping = Grouping::EXACT;
+    const ALL: [Grouping; 7] = [ONE, TWO, FIVE, TEN, HUNDRED, THOUSAND, EXACT];
 
     fn levels(pairs: &[(Price, u64)]) -> Vec<BookLevel> {
         pairs
@@ -386,7 +414,9 @@ mod tests {
         reference: Price,
     ) -> Vec<(Price, u64)> {
         let digits = reference.to_string().len() as u32;
-        let unit = 10_i64.pow(digits.saturating_sub(grouping.sig_figs));
+        let unit = grouping
+            .sig_figs
+            .map_or(1, |figures| 10_i64.pow(digits.saturating_sub(figures)));
         let width = unit * Price::from(grouping.mantissa);
         let mut buckets: Vec<(Price, u64)> = Vec::new();
         for level in side {
@@ -457,11 +487,55 @@ mod tests {
     #[test]
     fn widths_follow_the_reference_price_and_the_grouping() {
         let widths: Vec<Price> = ALL.iter().map(|g| g.width(81_234)).collect();
-        assert_eq!(widths, vec![1, 2, 5, 10, 100, 1_000]);
+        assert_eq!(widths, vec![1, 2, 5, 10, 100, 1_000, 1]);
         assert_eq!(ONE.width(99_999), 1);
+        assert_eq!(EXACT.width(100_000), 1);
+        assert_eq!(EXACT.width(1_234_567), 1);
         assert_eq!(ONE.width(100_000), 10);
         assert_eq!(FIVE.width(100_000), 50);
         assert_eq!(THOUSAND.width(100_000), 10_000);
+    }
+
+    #[test]
+    fn the_offered_groupings_include_the_one_without_rounding() {
+        assert!(ALL.iter().all(|g| g.is_offered()));
+        let no_rounding_with_mantissa = Grouping {
+            sig_figs: None,
+            mantissa: 2,
+        };
+        assert!(!no_rounding_with_mantissa.is_offered());
+        assert!(!grouping(6, 1).is_offered());
+        assert!(!grouping(4, 2).is_offered());
+    }
+
+    #[test]
+    fn the_grouping_without_rounding_stays_one_tick_wide_above_100_000() {
+        // Every price from 99,986 to 100,025 holds one lot. Five figures are
+        // $10 wide from the touch at 100,000 on, while the grouping without
+        // rounding still lists single prices.
+        let bids: Vec<(Price, u64)> = (0..20).map(|i| (100_005 - i, 1)).collect();
+        let asks: Vec<(Price, u64)> = (0..20).map(|i| (100_006 + i, 1)).collect();
+        let source = book(&bids, &asks);
+        let inputs = views(&source, &[EXACT, ONE, TEN]);
+        assert_eq!(pairs(&inputs[0].1.bids), bids);
+        assert_eq!(inputs[1].1.asks[0].price, 100_010);
+        let result = merged(&inputs);
+        assert_eq!(result.conflicting_qty, 0);
+        assert_eq!(pairs(&result.book.bids), bids);
+        assert_eq!(pairs(&result.book.asks), asks);
+        assert_round_trip(&inputs, &result, 100_005);
+    }
+
+    #[test]
+    fn the_grouping_without_rounding_is_the_finest_reference() {
+        // Its touch, not a rounded grouping's, gives the width of the
+        // coarser ones.
+        let source = book(&[(100_005, 3), (100_004, 1)], &[(100_006, 2)]);
+        let inputs = views(&source, &[TEN, EXACT]);
+        let result = merged(&inputs);
+        assert_eq!(result.conflicting_qty, 0);
+        assert_eq!(pairs(&result.book.bids), vec![(100_005, 3), (100_004, 1)]);
+        assert_round_trip(&inputs, &result, 100_005);
     }
 
     #[test]
@@ -805,7 +879,7 @@ mod tests {
             }
             past_100k += usize::from(source.asks.iter().any(|l| l.price > 100_000));
             let subset: Vec<Grouping> = loop {
-                let mask = rng.below(64);
+                let mask = rng.below(128);
                 let chosen: Vec<Grouping> = ALL
                     .iter()
                     .enumerate()
