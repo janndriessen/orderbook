@@ -21,7 +21,7 @@ function cells(row: HTMLElement) {
 
 describe("OrderBook", () => {
   beforeEach(() => {
-    // Room for far more than twelve 20 px rows per side.
+    // Room for more than twenty 20 px rows per side.
     stubViewport(1_000);
   });
 
@@ -81,25 +81,25 @@ describe("OrderBook", () => {
   });
 
   const deep = (start: number, step: number) =>
-    Array.from({ length: 20 }, (_, i) => level(start + i * step, 1));
+    Array.from({ length: 25 }, (_, i) => level(start + i * step, 1));
   const deepBook = () =>
     bookOf(snapshot({ bids: deep(1_000, -1), asks: deep(1_001, 1) }));
   const rowCount = (name: string) =>
     within(screen.getByRole("rowgroup", { name })).getAllByRole("row").length;
 
-  it("shows twelve rows per side of a deep book on a tall viewport", () => {
+  it("shows twenty rows per side of a deep book on a tall viewport", () => {
     render(<OrderBook book={deepBook()} market={market} lastTrade={null} />);
-    expect([rowCount("Asks"), rowCount("Bids")]).toEqual([12, 12]);
+    expect([rowCount("Asks"), rowCount("Bids")]).toEqual([20, 20]);
   });
 
-  it("shows fewer rows per side when the viewport is too short for twelve", () => {
+  it("shows fewer rows per side when the viewport is too short for twenty", () => {
     // 20 + 20 fixed, then 6 rows of 20 px: three per side.
     stubViewport(160);
     render(<OrderBook book={deepBook()} market={market} lastTrade={null} />);
     expect([rowCount("Asks"), rowCount("Bids")]).toEqual([3, 3]);
   });
 
-  it("keeps twelve slots per side so the spread bar does not move", () => {
+  it("keeps twenty slots per side so the spread bar does not move", () => {
     // jsdom has no layout and tests do not load stylesheets, so the blank
     // slots' height cannot be measured. The count the stylesheet turns into
     // height (--empty-rows) is checked instead.
@@ -111,7 +111,7 @@ describe("OrderBook", () => {
     const { rerender } = render(
       <OrderBook book={bookOf(snapshot())} market={market} lastTrade={null} />,
     );
-    expect([slots("Asks"), slots("Bids")]).toEqual([12, 12]);
+    expect([slots("Asks"), slots("Bids")]).toEqual([20, 20]);
 
     rerender(
       <OrderBook
@@ -121,7 +121,7 @@ describe("OrderBook", () => {
       />,
     );
     expect(rowCount("Bids")).toBe(1);
-    expect([slots("Asks"), slots("Bids")]).toEqual([12, 12]);
+    expect([slots("Asks"), slots("Bids")]).toEqual([20, 20]);
   });
 
   describe("depth bars", () => {

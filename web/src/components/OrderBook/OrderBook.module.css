@@ -1,4 +1,4 @@
-/* The panel is as tall as its header, the rows that fit (twelve per side at
+/* The panel is as tall as its header, the rows that fit (twenty per side at
    most) and the spread bar, centred in its slot, so the spread bar sits at the
    same place however deep the book is. The top padding keeps it below the
    connection status line, which is pinned to the top-left of the page. */

@@ -11,10 +11,9 @@ import { useRowsPerSide } from "./useRowsPerSide";
 /**
  * Levels shown per side when the window is tall enough. The panel keeps this
  * many slots on each side even when a side is thinner, so the spread bar never
- * moves. A replayed Hyperliquid book has at most 20 levels per side and is
- * usually deeper than 12; the service's own feed has no depth cap.
+ * moves. The service's feed has no depth cap, so a deeper book is cut here.
  */
-const ROWS_PER_SIDE = 12;
+const ROWS_PER_SIDE = 20;
 
 type Props = {
   book: BookState;

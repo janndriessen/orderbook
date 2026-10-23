@@ -27,9 +27,9 @@ The diagram shows the target design. Principles:
 </picture>
 
 Desktop only, in the dense style of a professional exchange order book.
-The book is a panel of 12 rows per side around a spread bar that stays put.
+The book is a panel of up to 20 rows per side around a spread bar that stays put.
 A side with fewer levels keeps its slots and leaves its far end blank.
-On a window too short for 12 rows per side, the panel shows as many as fit.
+On a window too short for 20 rows per side, the panel shows as many as fit.
 Numbers change at once while the depth bars ease to their new width.
 A level whose size changes flashes briefly.
 The spread bar shows the last trade price with an arrow for the taker side, in the bid color for a buy and the ask color for a sell.
@@ -43,7 +43,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `CancelRejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher and WebSocket feed (`orderbook` binary), with server-side pings that drop a client silent for 15–20 s
-- [x] Web UI: live order book (up to 12 rows per side) with depth bars and a spread bar, and a sliding flow log with filter and pause
+- [x] Web UI: live order book (up to 20 rows per side) with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
 - [x] The `matching` crate runs alone on its own engine thread, driven by random-walk order flow from the source thread through a bounded command queue
