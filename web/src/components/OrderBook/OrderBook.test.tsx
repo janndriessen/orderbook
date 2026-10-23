@@ -1,9 +1,10 @@
-import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { act, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMessage, type BookState } from "../../feed/book";
 import { level, market, snapshot } from "../../test/fixtures";
 import { stubViewport } from "../../test/layout";
 import { OrderBook } from "./OrderBook";
+import { HALF_LIFE_MS } from "./useEasedScale";
 
 function bookOf(message: ReturnType<typeof snapshot>): BookState {
   const result = applyMessage(null, message);
@@ -105,5 +106,57 @@ describe("OrderBook", () => {
     );
     expect(rowCount("Bids")).toBe(1);
     expect([slots("Asks"), slots("Bids")]).toEqual([12, 12]);
+  });
+
+  describe("depth bars", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    const depth = () =>
+      Number(
+        within(screen.getByRole("rowgroup", { name: "Bids" }))
+          .getAllByRole("row")[0]
+          ?.style.getPropertyValue("--depth"),
+      );
+
+    it("are measured against a scale that eases down over time", () => {
+      const thin = bookOf(
+        snapshot({ bids: [level(1_000_000, 1_000)], asks: [] }),
+      );
+      const { rerender } = render(
+        <OrderBook book={bookOf(snapshot())} market={market} />,
+      );
+      // Best bid 1,000 lots of a largest total of 6,000.
+      expect(depth()).toBeCloseTo(1_000 / 6_000);
+
+      rerender(<OrderBook book={thin} market={market} />);
+      expect(depth()).toBeCloseTo(1_000 / 6_000);
+
+      act(() => vi.advanceTimersByTime(HALF_LIFE_MS));
+      expect(depth()).toBeGreaterThan(1_000 / 6_000);
+      expect(depth()).toBeLessThan(1);
+
+      act(() => vi.advanceTimersByTime(20 * HALF_LIFE_MS));
+      expect(depth()).toBe(1);
+    });
+  });
+
+  it("gives every body row one cell per header column and nothing else", () => {
+    // Stylesheets are not loaded in tests, so a generated cell from a
+    // pseudo-element on a row cannot be seen here; this guards the markup and
+    // that the depth lives on the row itself as a custom property. The
+    // browser check covers the CSS.
+    render(<OrderBook book={bookOf(snapshot())} market={market} />);
+    const columns = screen.getAllByRole("columnheader").length;
+    const rows = screen
+      .getAllByRole("row")
+      .filter((row) => row.style.getPropertyValue("--depth") !== "");
+    expect(rows).toHaveLength(6);
+    for (const row of rows) {
+      expect(row.children).toHaveLength(columns);
+      expect(Array.from(row.children).every((c) => c.tagName === "TD")).toBe(
+        true,
+      );
+    }
   });
 });

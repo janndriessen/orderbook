@@ -4,6 +4,7 @@ import type { MarketInfo } from "../../protocol/MarketInfo";
 import { BookSide } from "./BookSide";
 import styles from "./OrderBook.module.css";
 import { SpreadBar } from "./SpreadBar";
+import { useEasedScale } from "./useEasedScale";
 import { useRowsPerSide } from "./useRowsPerSide";
 
 /**
@@ -24,12 +25,13 @@ export function OrderBook({ book, market }: Props) {
   const slots = useRowsPerSide(ref, ROWS_PER_SIDE);
   const [base = "", quote = ""] = market.symbol.split("-");
 
-  const { asks, bids, maxTotal } = useMemo(() => {
+  const { asks, bids, largest } = useMemo(() => {
     const asks = topRows(book.asks, "ask", slots);
     const bids = topRows(book.bids, "bid", slots);
-    const maxTotal = Math.max(asks.at(-1)?.total ?? 0, bids.at(-1)?.total ?? 0);
-    return { asks, bids, maxTotal };
+    const largest = Math.max(asks.at(-1)?.total ?? 0, bids.at(-1)?.total ?? 0);
+    return { asks, bids, largest };
   }, [book.asks, book.bids, slots]);
+  const maxTotal = useEasedScale(largest);
 
   return (
     <section

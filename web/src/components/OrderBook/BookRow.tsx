@@ -8,7 +8,7 @@ type Props = {
   price: number;
   qty: number;
   total: number;
-  /** Cumulative total of the deepest visible level on either side. */
+  /** Cumulative total that a full-width depth bar stands for. */
   maxTotal: number;
   market: MarketInfo;
 };
