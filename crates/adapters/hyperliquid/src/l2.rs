@@ -2,12 +2,14 @@
 //!
 //! It is not in the source's API documentation. After subscribing, the first
 //! message holds a full book of up to 20 levels per side, and every later one a
-//! change to it, compressed as base64 of a raw deflate stream of JSON. A change
+//! change to it: usually compressed, as base64 of a raw deflate stream of JSON,
+//! and sometimes, for a small change, the same JSON uncompressed. A change
 //! names the levels that are gone by their index in the book before the
 //! change, and the levels that are new or resized by price. Replaying recorded
-//! changes this way gave exactly the book of a fresh subscription at the same
-//! push. A subscription is for one price grouping, but no message says which,
-//! so a caller keeps one decoder per subscription.
+//! changes this way gave exactly the book of a fresh subscription, and of the
+//! documented 20-level feed, at the same push. A subscription is for one price
+//! grouping, but no message says which, so a caller keeps one decoder per
+//! subscription.
 
 use std::io::Read;
 
@@ -30,42 +32,47 @@ const MAX_CHANGE_BYTES: u64 = 1 << 20;
 /// means the stream is no longer the one this decoder understands.
 const MAX_DEPTH: usize = 20;
 
-/// `l2` payload as sent: exactly one of a full book or a compressed change.
+/// `l2` payload as sent: exactly one of a full book, a compressed change or
+/// an uncompressed change.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WireL2 {
     /// The full book, in the shape of an `l2Book` payload.
     pub s: Option<WireBook>,
-    /// A change to the book: base64 of a raw deflate stream of JSON.
+    /// A change to the book: base64 of a raw deflate stream of a
+    /// [`WireL2Change`].
     pub c: Option<String>,
+    /// A change to the book, uncompressed.
+    pub u: Option<WireL2Change>,
 }
 
-/// A change after decompression.
-#[derive(Deserialize)]
-struct WireChange {
+/// A change to an `l2` book, as sent uncompressed or after decompression.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireL2Change {
     /// Market name, e.g. `BTC`.
-    c: String,
+    pub c: String,
     /// Time in milliseconds.
-    t: u64,
+    pub t: u64,
     /// New or resized levels of the bids and of the asks.
-    l: [Vec<WireChangedLevel>; 2],
+    pub l: [Vec<WireL2Level>; 2],
     /// Indices of the bid and of the ask levels that are gone, counted in
     /// the book before the change.
-    r: [Vec<usize>; 2],
+    pub r: [Vec<usize>; 2],
 }
 
 /// One new or resized level of a change.
-#[derive(Deserialize)]
-struct WireChangedLevel {
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireL2Level {
     /// Price as a decimal string.
-    p: String,
+    pub p: String,
     /// Total size as a decimal string.
-    s: String,
+    pub s: String,
 }
 
 /// Why an `l2` message could not be applied.
 #[derive(Debug, thiserror::Error)]
 pub enum L2Error {
-    /// The payload holds neither a book nor a change, or both.
+    /// The payload holds none of a book, a compressed and an uncompressed
+    /// change, or more than one.
     #[error("an l2 message must hold exactly one of a book or a change")]
     Shape,
     /// A change arrived with no book to apply it to: before the first book,
@@ -150,16 +157,22 @@ impl L2Decoder {
     /// its best ask. When a message fails, for any reason, the decoder drops
     /// its book: a failed message may be a missed change, after which the
     /// indices of every later change would name the wrong levels. Changes
-    /// then fail with [`L2Error::NoBook`] until a book arrives again.
+    /// then fail with [`L2Error::NoBook`] until a book arrives again. A line
+    /// that does not parse as a [`crate::Message`] never reaches the decoder;
+    /// it may be a missed change too, so the caller then starts a new decoder.
     ///
     /// # Errors
     ///
     /// Returns an [`L2Error`] saying what was wrong with the message.
     pub fn apply(&mut self, wire: &WireL2, market: &MarketInfo) -> Result<&BookSnapshot, L2Error> {
         let previous = self.book.take();
-        let next = match (&wire.s, &wire.c) {
-            (Some(book), None) => book.to_snapshot(market)?,
-            (None, Some(change)) => {
+        let next = match (&wire.s, &wire.c, &wire.u) {
+            (Some(book), None, None) => book.to_snapshot(market)?,
+            (None, Some(compressed), None) => {
+                let book = previous.ok_or(L2Error::NoBook)?;
+                apply_change(&book, &inflate(compressed)?, market)?
+            }
+            (None, None, Some(change)) => {
                 apply_change(&previous.ok_or(L2Error::NoBook)?, change, market)?
             }
             _ => return Err(L2Error::Shape),
@@ -199,21 +212,25 @@ fn best_first(levels: &[BookLevel], side: Side) -> bool {
         .all(|pair| rank(side, pair[0].price) < rank(side, pair[1].price))
 }
 
-fn apply_change(
-    book: &BookSnapshot,
-    change: &str,
-    market: &MarketInfo,
-) -> Result<BookSnapshot, L2Error> {
-    let compressed = STANDARD.decode(change).map_err(L2Error::Base64)?;
+/// Decodes a compressed change.
+fn inflate(compressed: &str) -> Result<WireL2Change, L2Error> {
+    let bytes = STANDARD.decode(compressed).map_err(L2Error::Base64)?;
     let mut json = Vec::new();
-    DeflateDecoder::new(compressed.as_slice())
+    DeflateDecoder::new(bytes.as_slice())
         .take(MAX_CHANGE_BYTES + 1)
         .read_to_end(&mut json)
         .map_err(L2Error::Inflate)?;
     if json.len() as u64 > MAX_CHANGE_BYTES {
         return Err(L2Error::TooLarge);
     }
-    let change: WireChange = serde_json::from_slice(&json).map_err(L2Error::Json)?;
+    serde_json::from_slice(&json).map_err(L2Error::Json)
+}
+
+fn apply_change(
+    book: &BookSnapshot,
+    change: &WireL2Change,
+    market: &MarketInfo,
+) -> Result<BookSnapshot, L2Error> {
     check_coin(&change.c)?;
     let ts = micros(change.t)?;
     if ts < book.ts {
@@ -233,7 +250,7 @@ fn apply_change(
 fn apply_side(
     levels: &[BookLevel],
     removed: &[usize],
-    changed: &[WireChangedLevel],
+    changed: &[WireL2Level],
     side: Side,
     market: &MarketInfo,
 ) -> Result<Vec<BookLevel>, L2Error> {
@@ -305,6 +322,7 @@ mod tests {
         WireL2 {
             s: None,
             c: Some(compress(json.as_bytes())),
+            u: None,
         }
     }
 
@@ -317,6 +335,7 @@ mod tests {
         WireL2 {
             s: Some(serde_json::from_str(text).expect("fixture parses")),
             c: None,
+            u: None,
         }
     }
 
@@ -380,6 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn an_uncompressed_change_applies_like_a_compressed_one() {
+        let json = r#"{"c":"BTC","t":2,"l":[[{"p":"100.0","s":"0.00005"}],[{"p":"104.0","s":"0.00003"}]],"r":[[1],[0]]}"#;
+        let uncompressed = WireL2 {
+            s: None,
+            c: None,
+            u: Some(serde_json::from_str(json).expect("fixture parses")),
+        };
+        let compressed = after_book(&change(json)).expect("compressed change applies");
+        assert_eq!(
+            after_book(&uncompressed).expect("uncompressed change applies"),
+            compressed
+        );
+        assert_eq!(compressed.bids, vec![lvl(100, 5, 0), lvl(96, 1, 1)]);
+    }
+
+    #[test]
     fn indices_count_in_the_book_before_the_change() {
         let mut decoder = started();
         // A new bid at 99 lands before index 2, but index 2 still names 96.
@@ -430,12 +465,17 @@ mod tests {
                 .expect("fixture parses"),
             ),
             c: None,
+            u: None,
         };
         let mut eth = book();
         if let Some(book) = eth.s.as_mut() {
             book.coin = "ETH".to_string();
         }
-        let empty = WireL2 { s: None, c: None };
+        let empty = WireL2 {
+            s: None,
+            c: None,
+            u: None,
+        };
         let good = r#"{"c":"BTC","t":3,"l":[[],[]],"r":[[],[]]}"#;
         for bad in [unsorted, eth, empty] {
             let mut decoder = started();
@@ -458,6 +498,7 @@ mod tests {
         let wire = WireL2 {
             s: Some(serde_json::from_str(text).expect("fixture parses")),
             c: None,
+            u: None,
         };
         let result = L2Decoder::new().apply(&wire, &market()).cloned();
         assert!(matches!(result, Err(L2Error::ZeroSize { price: 100 })));
@@ -521,6 +562,7 @@ mod tests {
         let wire = WireL2 {
             s: Some(serde_json::from_str(text).expect("fixture parses")),
             c: None,
+            u: None,
         };
         let result = L2Decoder::new().apply(&wire, &market()).cloned();
         assert!(matches!(
@@ -569,6 +611,7 @@ mod tests {
             let wire = WireL2 {
                 s: Some(serde_json::from_str(&text).expect("fixture parses")),
                 c: None,
+                u: None,
             };
             let result = L2Decoder::new().apply(&wire, &market()).cloned();
             assert!(matches!(result, Err(L2Error::Unsorted)), "{levels}");
@@ -577,9 +620,24 @@ mod tests {
 
     #[test]
     fn a_message_holds_exactly_one_of_book_or_change() {
-        let mut both = book();
-        both.c = change(r#"{}"#).c;
-        for wire in [WireL2 { s: None, c: None }, both] {
+        let change_json = r#"{"c":"BTC","t":2,"l":[[],[]],"r":[[],[]]}"#;
+        let uncompressed: WireL2Change = serde_json::from_str(change_json).expect("fixture parses");
+        let mut book_and_change = book();
+        book_and_change.c = change(change_json).c;
+        let mut book_and_uncompressed = book();
+        book_and_uncompressed.u = Some(uncompressed.clone());
+        let mut both_changes = change(change_json);
+        both_changes.u = Some(uncompressed);
+        for wire in [
+            WireL2 {
+                s: None,
+                c: None,
+                u: None,
+            },
+            book_and_change,
+            book_and_uncompressed,
+            both_changes,
+        ] {
             let result = after_book(&wire);
             assert!(matches!(result, Err(L2Error::Shape)));
         }
@@ -590,11 +648,13 @@ mod tests {
         let not_base64 = WireL2 {
             s: None,
             c: Some("not base64!".to_string()),
+            u: None,
         };
         assert!(matches!(after_book(&not_base64), Err(L2Error::Base64(_))));
         let not_deflate = WireL2 {
             s: None,
             c: Some(STANDARD.encode([0xff_u8; 16])),
+            u: None,
         };
         assert!(matches!(after_book(&not_deflate), Err(L2Error::Inflate(_))));
         assert!(matches!(
@@ -657,7 +717,8 @@ mod tests {
             serde_json::from_str::<Message>(text).expect("parses"),
             Message::L2(WireL2 {
                 s: None,
-                c: Some("abc".to_string())
+                c: Some("abc".to_string()),
+                u: None,
             })
         );
         let duplicate = r#"{"channel":"l2","data":{"c":"abc","c":"abd"}}"#;
