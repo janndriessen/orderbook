@@ -26,7 +26,7 @@ const deliver = (message: unknown) =>
 
 describe("App", () => {
   beforeEach(() => {
-    stubViewport(160);
+    stubViewport(1_000);
     FakeWebSocket.instances = [];
     vi.stubGlobal("WebSocket", FakeWebSocket);
   });

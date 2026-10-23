@@ -6,6 +6,14 @@ import styles from "./OrderBook.module.css";
 import { SpreadBar } from "./SpreadBar";
 import { useRowsPerSide } from "./useRowsPerSide";
 
+/**
+ * Levels shown per side when the window is tall enough. The panel keeps this
+ * many slots on each side even when a side is thinner, so the spread bar never
+ * moves. A replayed Hyperliquid book has at most 20 levels per side and is
+ * usually deeper than 12; the service's own feed has no depth cap.
+ */
+const ROWS_PER_SIDE = 12;
+
 type Props = {
   book: BookState;
   market: MarketInfo;
@@ -13,12 +21,12 @@ type Props = {
 
 export function OrderBook({ book, market }: Props) {
   const ref = useRef<HTMLElement>(null);
-  const slots = useRowsPerSide(ref);
+  const slots = useRowsPerSide(ref, ROWS_PER_SIDE);
   const [base = "", quote = ""] = market.symbol.split("-");
 
   const { asks, bids, maxTotal } = useMemo(() => {
-    const asks = topRows(book.asks, "ask", slots.asks);
-    const bids = topRows(book.bids, "bid", slots.bids);
+    const asks = topRows(book.asks, "ask", slots);
+    const bids = topRows(book.bids, "bid", slots);
     const maxTotal = Math.max(asks.at(-1)?.total ?? 0, bids.at(-1)?.total ?? 0);
     return { asks, bids, maxTotal };
   }, [book.asks, book.bids, slots]);
@@ -40,7 +48,7 @@ export function OrderBook({ book, market }: Props) {
         <BookSide
           side="ask"
           rows={asks}
-          slots={slots.asks}
+          slots={slots}
           maxTotal={maxTotal}
           market={market}
         />
@@ -52,7 +60,7 @@ export function OrderBook({ book, market }: Props) {
         <BookSide
           side="bid"
           rows={bids}
-          slots={slots.bids}
+          slots={slots}
           maxTotal={maxTotal}
           market={market}
         />

@@ -1,11 +1,13 @@
-/* The header shares the top band with the status line, and the table runs to
-   the bottom edge: rows keep their whole-pixel height and the spread bar takes
-   the few pixels left over after counting, so every edge stays sharp. */
+/* The panel is as tall as its header, the rows that fit (twelve per side at
+   most) and the spread bar, centred in its slot, so the spread bar sits at the
+   same place however deep the book is. The top padding keeps it below the
+   connection status line, which is pinned to the top-left of the page. */
 .book {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   height: 100%;
-  padding: var(--top-inset) var(--space-4) 0;
+  padding: calc(var(--top-inset) + var(--header-height)) var(--space-4) 0;
 }
 
 .table {

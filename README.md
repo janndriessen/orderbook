@@ -26,7 +26,13 @@ The diagram shows the target design. Principles:
   <img alt="Web UI layout. Left: the order book is centered with asks above bids and a toggle button at the top right. Right: with the flow log open, the screen splits into halves, the book centered in the left half and the flow log centered in the right half, with the toggle at the right end of its toolbar." src="docs/ui-layout-light.svg">
 </picture>
 
-Desktop only, in the dense style of a professional exchange order book. The book fills the browser height; a toggle opens the flow log beside it, with filtering and pause. The log is ready to show rejected orders and refused cancels and replaces; the random-walk order flow never provokes them. The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
+Desktop only, in the dense style of a professional exchange order book.
+The book is a panel of 12 rows per side around a spread bar that stays put.
+A side with fewer levels keeps its slots and leaves its far end blank.
+On a window too short for 12 rows per side, the panel shows as many as fit.
+A toggle opens the flow log beside it, with filtering and pause.
+The log is ready to show rejected orders and refused cancels and replaces; the random-walk order flow never provokes them.
+The feed is the source of truth for book state: the UI applies snapshots and diffs by sequence number and never derives the book from the event log.
 
 ## Status
 
@@ -34,7 +40,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
 
 - [x] Cargo workspace and `protocol` crate: `OrderId`, `Seq`, `Price`, `Qty`, `Ts`, `Side`, `Envelope<T>`, engine `Command`s (`Place`, `Cancel`, `Replace`), engine `Event`s (`Accepted`, `Rejected`, `CancelRejected`, `Trade`, `Replaced`, `Canceled`, `L2Update`) and the market-data `FeedMessage` (`Snapshot`, `Update`, `Heartbeat`), with generated TypeScript types for the types the web client reads (not commands) checked in CI
 - [x] Publisher and WebSocket feed (`orderbook` binary), with server-side pings that drop a client silent for 15–20 s
-- [x] Web UI: full-height live order book with depth bars and a spread bar, and a sliding flow log with filter and pause
+- [x] Web UI: live order book (up to 12 rows per side) with depth bars and a spread bar, and a sliding flow log with filter and pause
 - [x] `matching` crate: order book (sorted price levels, FIFO queues) and matching of good-till-cancel, IOC and post-only limit orders and market orders with price-time priority, and cancel and replace of resting orders
 - [x] Hand-written deterministic scenarios in `scenarios/`, run by `cargo test -p matching`
 - [x] The `matching` crate runs alone on its own engine thread, driven by random-walk order flow from the source thread through a bounded command queue

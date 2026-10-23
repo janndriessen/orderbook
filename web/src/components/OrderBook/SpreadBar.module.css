@@ -1,5 +1,5 @@
 .bar {
-  height: calc(var(--spread-height) + var(--spread-extra, 0px));
+  height: var(--spread-height);
   background: var(--color-surface);
 }
 
