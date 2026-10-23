@@ -89,7 +89,8 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
     - the first complete push that merges starts the replay; trades at or before it (the backlog sent on subscribing) are dropped, trades after the last complete push that merges are dropped and counted
     - every other trade is translated at the time of the first complete push at or after its own time, before that push's snapshot, so the engine's book changes only at pushes, as the source's web app does
     - test: a recorded fixture of all six groupings (`crates/replayer/tests/l2.rs`) checks that after every complete push the matcher's book equals the merged book exactly and, grouped by each grouping's rule, gives that grouping's own book, and that every held trade became an order
-  - [ ] Oracle test per grouping
+  - [x] Oracle test per grouping (`crates/replayer/tests/l2_oracle.rs`): the `l2` fixture runs through the running service and a client follows the feed from its snapshot, with each of the 18 complete pushes released only once the client has all of the previous push's events, so a push never shares an update with another
+    - a push is complete when the client has received as many feed events as a local matcher produces for the push's commands (the engine is deterministic; level updates are not counted, the feed turns them into level changes); then the client's book equals that push's merged book exactly and, grouped by each of the six groupings' rules (top 20 buckets), equals that grouping's decoded view; the 18 pushes compared are asserted, counted from the fixture separately
   - [x] Web UI: rows filling the panel (up to 20), bars without easing, a flash on new price levels only, and a grouping menu
 - [ ] Deployment to a small Hetzner server
 
