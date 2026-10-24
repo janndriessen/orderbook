@@ -3,12 +3,9 @@
 //! recorded fixture that belong to it, and the book the service ends up
 //! serving is compared with what `load` makes of the same recording.
 //!
-//! The fixture ends on a push that no later book has settled, and the live
-//! path only emits a push once every price grouping has sent a book after it
-//! (there is no end of input to settle the rest). The server therefore adds
-//! one more full book per grouping, the same as the last one, after the
-//! recording; the expected book is the one `load` makes of the recording with
-//! those lines added.
+//! The server adds one more full book per grouping after the recording, the
+//! same as the last one, as a source that keeps sending would; the expected
+//! book is the one `load` makes of the recording with those lines added.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -184,7 +181,7 @@ fn added_books(fixture: &Recording) -> BTreeMap<Key, Sent> {
 }
 
 /// The fixture as one round, with the last full book of every grouping added
-/// after it so that its last real push is settled.
+/// after it.
 fn whole_round(fixture: &Recording) -> Round {
     let mut added = added_books(fixture);
     let mut lines = BTreeMap::new();
@@ -224,7 +221,7 @@ fn split_rounds(fixture: &Recording, split: u64) -> Vec<Round> {
     let mut second = BTreeMap::new();
     for (key, sent) in &fixture.lines {
         // The first round ends with a full book of its own, 1 ms before the
-        // cut, that settles its last real push like the added ones do.
+        // cut, as a source that keeps sending would.
         let before = fixture.books[key]
             .iter()
             .rev()

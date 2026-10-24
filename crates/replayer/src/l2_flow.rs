@@ -15,6 +15,7 @@ use hyperliquid_adapter::{
     merge,
 };
 use protocol::{Command, MarketInfo, Ts};
+use tracing::debug;
 
 use crate::{Classified, Feed, LoadError, classify, message, mismatch};
 
@@ -41,6 +42,9 @@ pub struct L2Stats {
     /// push at or after their time) was already released, and were held to
     /// the next one instead.
     pub late_trades: usize,
+    /// Pushes merged and translated again because a grouping sent a second
+    /// book at the time of a push already released.
+    pub reapplied_pushes: usize,
     /// Push times before the one at which the last grouping sent its first
     /// book, which were left out.
     pub startup_pushes: usize,
@@ -68,10 +72,13 @@ pub struct L2Stats {
 /// commands for the engine.
 ///
 /// A push is complete when every one of the flow's groupings has a book at
-/// exactly its time. A push is settled, and its commands emitted, once every
-/// grouping has sent a book after it: any later book of a grouping says that
-/// it sends none for the push. Complete pushes are merged and translated in
-/// time order; the others are left out and counted. Trades are translated at
+/// exactly its time, and it is merged and translated, and its commands
+/// emitted, the moment it is. An incomplete push is settled once every
+/// grouping has sent a book after it (any later book of a grouping says that
+/// it sends none for the push), and is left out and counted. Pushes are
+/// handled in time order. A grouping can send a second book at the time of
+/// the push released last (the decoder accepts a change with the same time);
+/// the push is then merged and translated again with it. Trades are translated at
 /// the time of the first merged push at or after their own time, before that
 /// push's snapshot, so the book changes only at pushes, as in the source's
 /// web app. A trade whose push was already settled when it arrived goes to
@@ -96,6 +103,9 @@ pub struct L2Flow {
     /// The time at which the last grouping sent its first book.
     all_started: Ts,
     pending: BTreeMap<Ts, Push>,
+    /// The complete push released last, with the books it was made from, for
+    /// a grouping that sends another book at the same time.
+    released: Option<(Ts, Push)>,
     /// The time of the first push that merged since the connections were
     /// opened; trades at or before it are the backlog.
     first_merged: Option<Ts>,
@@ -119,6 +129,7 @@ impl L2Flow {
             latest: BTreeMap::new(),
             all_started: 0,
             pending: BTreeMap::new(),
+            released: None,
             first_merged: None,
             trades: Vec::new(),
             out: Vec::new(),
@@ -213,15 +224,24 @@ impl L2Flow {
             .entry(grouping)
             .or_default()
             .apply(wire, &self.market)
-            .map_err(|source| LoadError::L2 { line, source })?;
+            .map_err(|source| LoadError::L2 { line, source })?
+            .clone();
         let ts = book.ts;
+        // Another book at the time of the push released last: the push is
+        // merged and translated again with it.
+        if self.done_through == Some(ts)
+            && let Some((released, push)) = self.released.as_mut()
+            && *released == ts
+        {
+            push.insert(grouping, book);
+            let push = push.clone();
+            self.reapply(ts, &push);
+            return Ok(std::mem::take(&mut self.out));
+        }
         if self.done_through.is_some_and(|done| ts <= done) {
             return Err(LoadError::Backwards { line });
         }
-        self.pending
-            .entry(ts)
-            .or_default()
-            .insert(grouping, book.clone());
+        self.pending.entry(ts).or_default().insert(grouping, book);
         match self.latest.entry(grouping) {
             Entry::Vacant(entry) => {
                 self.all_started = self.all_started.max(ts);
@@ -241,6 +261,17 @@ impl L2Flow {
                 let (ts, push) = entry.remove_entry();
                 self.settle(ts, &push, false);
             }
+            // A push every grouping has a book of does not wait for later
+            // books: nothing can be added to it but a second book of one
+            // grouping at the same time, which is merged in afterwards.
+            if self
+                .pending
+                .get(&ts)
+                .is_some_and(|push| push.len() == self.groupings)
+                && let Some(push) = self.pending.remove(&ts)
+            {
+                self.settle(ts, &push, false);
+            }
         }
         Ok(std::mem::take(&mut self.out))
     }
@@ -255,6 +286,8 @@ impl L2Flow {
         self.latest.clear();
         self.all_started = 0;
         self.pending.clear();
+        self.released = None;
+        self.last_merged = None;
         self.first_merged = None;
         self.trades.clear();
         self.out.clear();
@@ -277,6 +310,25 @@ impl L2Flow {
         (self.out, self.stats)
     }
 
+    /// Merges and translates the push at `ts` again after a grouping sent
+    /// another book at that time. The translator mirrors whole snapshots, so
+    /// this only brings the engine's book to the later books.
+    fn reapply(&mut self, ts: Ts, push: &Push) {
+        let inputs: Vec<(Grouping, &BookSnapshot)> = push
+            .iter()
+            .map(|(&grouping, book)| (grouping, book))
+            .collect();
+        match merge(&inputs) {
+            Ok(merged) => {
+                self.stats.reapplied_pushes += 1;
+                self.out.extend(self.translator.on_snapshot(&merged.book));
+            }
+            Err(error) => {
+                debug!(ts, %error, "push at the same time does not merge, left as it was")
+            }
+        }
+    }
+
     /// Replays or leaves out the push at `ts`. `open` is whether the input
     /// ended before the push was settled.
     fn settle(&mut self, ts: Ts, push: &Push, open: bool) {
@@ -291,6 +343,7 @@ impl L2Flow {
             }
             return;
         }
+        self.released = Some((ts, push.clone()));
         let inputs: Vec<(Grouping, &BookSnapshot)> = push
             .iter()
             .map(|(&grouping, book)| (grouping, book))

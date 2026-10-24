@@ -2,7 +2,7 @@
 //! commands go to the engine as they come, and a lost connection is replaced.
 //!
 //! Nothing is paced: a command goes to the engine the moment the push it
-//! belongs to is settled. When any of the seven connections fails (closed,
+//! belongs to is complete. When any of the seven connections fails (closed,
 //! lost, silent for too long, or a message that does not apply), all of them
 //! are dropped and opened again after a pause that doubles up to a limit. What
 //! was learned from the old connections is forgotten, but the flow keeps its

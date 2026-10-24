@@ -227,6 +227,10 @@ pub struct Loaded {
     /// been replayed, and were held to the next push instead. Always 0
     /// without `l2` lines.
     pub late_trades: usize,
+    /// Pushes merged and translated again because a grouping sent a second
+    /// book at the time of a push already replayed. Always 0 without `l2`
+    /// lines.
+    pub reapplied_pushes: usize,
     /// Top-of-book snapshots, best bid and offer messages included, before
     /// the first full snapshot, which were left out.
     pub dropped_top_snapshots: usize,
@@ -465,12 +469,15 @@ fn mismatch(line: usize) -> LoadError {
 /// time.
 ///
 /// Lines arrive roughly but not strictly in time order, since each grouping
-/// has its own connection. A push is therefore replayed once every grouping
-/// has sent a book after it (any later book of a grouping settles that it
-/// sends none for the push), and the rest at the end; pushes are held until
-/// then, and a grouping that stops early keeps every later push held until
-/// the end. A grouping whose books go back in time behind a push already
-/// replayed is an error. The lines are read in order and the header, channel,
+/// has its own connection. A complete push is replayed as soon as its last
+/// book arrives. An incomplete one is replayed (left out and counted) once
+/// every grouping has sent a book after it (any later book of a grouping
+/// settles that it sends none for the push), and the rest at the end; such
+/// pushes are held until then, and a grouping that stops early keeps every
+/// later incomplete push held until the end. A grouping that sends a second
+/// book at the time of the push replayed last makes that push be merged and
+/// translated again (`reapplied_pushes`). A grouping whose books go back in
+/// time behind a push already replayed is an error. The lines are read in order and the header, channel,
 /// subscription, parsing and conversion errors come out in line order; the
 /// errors of applying an `l2` line to its grouping's book (`L2`, `Backwards`)
 /// come after them, as described on [`LoadError`].
@@ -646,6 +653,7 @@ fn load_l2(scan: Scan<'_>, market: &MarketInfo) -> Result<Loaded, LoadError> {
         dropped_trades: stats.dropped_trades,
         dropped_late_trades: stats.dropped_late_trades,
         late_trades: stats.late_trades,
+        reapplied_pushes: stats.reapplied_pushes,
         incomplete_last_line: scan.incomplete_last_line,
         skipped_book_lines,
         startup_pushes: stats.startup_pushes,
@@ -1247,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_emits_a_push_once_every_grouping_has_sent_a_later_book() {
+    fn a_flow_emits_a_complete_push_before_any_later_book_arrives() {
         // The ask shrinks at every push, so that each push makes commands.
         let lines: Vec<String> = [(1_000, "1.0"), (2_000, "0.9"), (3_000, "0.8")]
             .into_iter()
@@ -1258,11 +1266,58 @@ mod tests {
             .iter()
             .map(|commands| !commands.is_empty())
             .collect();
-        // Push 1,000 is settled by the second book at 2,000, push 2,000 by
-        // the second book at 3,000, and push 3,000 only by the end.
-        assert_eq!(made, [false, false, false, true, false, true, true]);
+        // Each push is emitted by its second book, with no later book sent.
+        assert_eq!(made, [false, true, false, true, false, true, false]);
         let all: Vec<(Ts, Command)> = per_line.concat();
         assert_eq!(all, load_lines(&lines).expect("loads").commands);
+    }
+
+    #[test]
+    fn a_second_book_at_the_time_of_a_released_push_merges_the_push_again() {
+        // The $1 grouping sends its book again at 1,000 with a smaller ask,
+        // after the push was released with both groupings.
+        let lines = [fine(1_000, "1.0"), coarse(1_000, "1.0"), fine(1_000, "0.7")];
+        let (per_line, stats) = flow_run(&lines);
+        assert!(!per_line[1].is_empty(), "released by its last book");
+        assert!(!per_line[2].is_empty(), "the later book makes commands");
+        assert_eq!(stats.reapplied_pushes, 1);
+        assert_eq!(stats.divergence, Divergence::default());
+        let all: Vec<(Ts, Command)> = per_line.concat();
+        assert_eq!(after(all).1, Levels::from([(81_001, 70_000)]));
+    }
+
+    #[test]
+    fn a_book_older_than_the_released_push_is_backwards() {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        for (number, line) in both(1_000, "1.0").iter().enumerate() {
+            flow.line(number + 1, line).expect("accepts the line");
+        }
+        let err = flow
+            .line(3, &fine(900, "1.0"))
+            .expect_err("older than the push");
+        assert!(matches!(err, LoadError::Backwards { line: 3 }), "{err}");
+    }
+
+    #[test]
+    fn an_incomplete_push_waits_until_every_grouping_is_past_it() {
+        let lines = [
+            fine(1_000, "1.0"),
+            coarse(1_000, "1.0"),
+            // Only the $1 grouping has sent 1,500 so far.
+            fine(1_500, "0.9"),
+            coarse(2_000, "0.8"),
+            fine(2_000, "0.8"),
+        ];
+        let mut flow = L2Flow::new(engine::market(), 2);
+        let mut made = Vec::new();
+        for (number, line) in lines.iter().enumerate() {
+            made.push(flow.line(number + 1, line).expect("accepts the line").len());
+        }
+        assert!(made[1] > 0);
+        assert_eq!(&made[2..4], &[0, 0], "push 1,500 is still open");
+        assert!(made[4] > 0, "push 2,000 is complete");
+        let (_, stats) = flow.finish();
+        assert_eq!(stats.skipped_pushes, 1, "settled once both are past it");
     }
 
     #[test]
@@ -1271,7 +1326,7 @@ mod tests {
             .into_iter()
             .flat_map(|time| both(time, "1.0"))
             .collect();
-        // Written after the second book at 3,000, which released push 2,000,
+        // Written after the second book at 3,000, which released push 3,000,
         // although its time is before that push.
         lines.push(trade_line(1_500, "B", 81_001));
         lines.extend(both(4_000, "1.0"));
@@ -1279,11 +1334,11 @@ mod tests {
         assert_eq!(stats.late_trades, 1);
         assert_eq!(stats.dropped_late_trades, 0);
         let all: Vec<(Ts, Command)> = per_line.concat();
-        let first_at_3_000 = all
+        let first_at_4_000 = all
             .iter()
-            .position(|&(ts, _)| ts == 3_000_000)
-            .expect("a command at push 3,000");
-        assert!(is_ioc(&all[first_at_3_000].1));
+            .position(|&(ts, _)| ts == 4_000_000)
+            .expect("a command at push 4,000");
+        assert!(is_ioc(&all[first_at_4_000].1));
         assert!(!all.iter().any(|&(ts, _)| ts == 1_500_000));
         let loaded = load_lines(&lines).expect("loads");
         assert_eq!(loaded.late_trades, 1);
