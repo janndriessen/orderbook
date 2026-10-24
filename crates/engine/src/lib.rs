@@ -15,7 +15,7 @@ mod publisher;
 mod source;
 mod ws;
 
-pub use app::{cancel_on_ctrl_c, market, run};
+pub use app::{cancel_on_ctrl_c, market, max_clients_from_env, run};
 pub use source::{RandomWalk, Step};
 pub use tokio_util::sync::CancellationToken;
-pub use ws::PING_INTERVAL;
+pub use ws::{MAX_CLIENTS, PING_INTERVAL};

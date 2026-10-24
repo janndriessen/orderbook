@@ -1,6 +1,7 @@
 //! Wires the source, the engine, the publisher and the WebSocket server together.
 
 use std::any::Any;
+use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::thread::JoinHandle;
@@ -45,6 +46,29 @@ pub fn cancel_on_ctrl_c() -> CancellationToken {
     shutdown
 }
 
+/// The client cap from `ORDERBOOK_MAX_CLIENTS`, or the default when unset.
+///
+/// Fails with `InvalidInput` when the value is not a non-negative integer in
+/// UTF-8; [`run`] checks the range.
+pub fn max_clients_from_env() -> io::Result<usize> {
+    parse_max_clients(std::env::var_os("ORDERBOOK_MAX_CLIENTS").as_deref())
+}
+
+fn parse_max_clients(value: Option<&OsStr>) -> io::Result<usize> {
+    let Some(value) = value else {
+        return Ok(ws::MAX_CLIENTS);
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<usize>().ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("ORDERBOOK_MAX_CLIENTS must be an integer, got {value:?}"),
+            )
+        })
+}
+
 /// Runs the service on `listener` until `shutdown` fires or a component dies.
 ///
 /// Starts the source thread with the given order `flow`, the engine thread
@@ -55,6 +79,10 @@ pub fn cancel_on_ctrl_c() -> CancellationToken {
 /// intervals. A zero `ping_interval` is rejected with `InvalidInput` before
 /// anything starts.
 ///
+/// At most `max_clients` feed clients are served at once (see
+/// [`max_clients_from_env`]); zero, or more than [`ws::MAX_CLIENTS_LIMIT`], is
+/// rejected like a zero ping interval.
+///
 /// Returns an error if the server failed or if the publisher, the engine or
 /// the source panicked, so a supervisor can restart the process.
 pub async fn run(
@@ -62,7 +90,17 @@ pub async fn run(
     flow: impl Iterator<Item = Step> + Send + 'static,
     shutdown: CancellationToken,
     ping_interval: Duration,
+    max_clients: usize,
 ) -> io::Result<()> {
+    if !(1..=ws::MAX_CLIENTS_LIMIT).contains(&max_clients) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "client limit must be between 1 and {}, got {max_clients}",
+                ws::MAX_CLIENTS_LIMIT
+            ),
+        ));
+    }
     if ping_interval.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -84,7 +122,7 @@ pub async fn run(
     info!(%addr, "serving feed at /ws");
     let served = axum::serve(
         feed_listener(listener),
-        ws::router(handle, shutdown.clone(), ping_interval),
+        ws::router(handle, shutdown.clone(), ping_interval, max_clients),
     )
     .with_graceful_shutdown(shutdown.clone().cancelled_owned())
     .await;
@@ -171,6 +209,25 @@ mod tests {
     use axum::serve::Listener;
 
     use super::*;
+
+    #[test]
+    fn the_client_cap_is_parsed_from_the_environment_value() {
+        let parse = |text: &str| parse_max_clients(Some(OsStr::new(text)));
+        assert_eq!(parse_max_clients(None).expect("default"), ws::MAX_CLIENTS);
+        assert_eq!(parse("42").expect("number"), 42);
+        for bad in ["", "abc", "-1", "1.5", " 7"] {
+            let err = parse(bad).expect_err(bad);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_client_cap_is_an_error_not_the_default() {
+        use std::os::unix::ffi::OsStrExt;
+        let err = parse_max_clients(Some(OsStr::from_bytes(b"5\xff"))).expect_err("not UTF-8");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
 
     #[tokio::test]
     async fn accepted_feed_connections_have_nagle_off() {

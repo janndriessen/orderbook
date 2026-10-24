@@ -151,6 +151,7 @@ async fn the_feed_shows_every_complete_push_and_every_grouping_of_it() {
         flow,
         engine::CancellationToken::new(),
         engine::PING_INTERVAL,
+        engine::MAX_CLIENTS,
     ));
     let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
         .await

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use engine::{RandomWalk, Step};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use protocol::{Command, FeedMessage, OrderType, Side, TimeInForce};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -67,6 +67,13 @@ async fn follow(client: &mut Client, count: u64) -> (u64, u64) {
 type Server = JoinHandle<io::Result<()>>;
 
 async fn start(ping_interval: Duration) -> (SocketAddr, CancellationToken, Server) {
+    start_capped(ping_interval, engine::MAX_CLIENTS).await
+}
+
+async fn start_capped(
+    ping_interval: Duration,
+    max_clients: usize,
+) -> (SocketAddr, CancellationToken, Server) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let shutdown = CancellationToken::new();
@@ -75,6 +82,7 @@ async fn start(ping_interval: Duration) -> (SocketAddr, CancellationToken, Serve
         RandomWalk::new(7, 0),
         shutdown.clone(),
         ping_interval,
+        max_clients,
     ));
     (addr, shutdown, server)
 }
@@ -160,12 +168,55 @@ async fn a_zero_ping_interval_is_rejected() {
             RandomWalk::new(7, 0),
             CancellationToken::new(),
             Duration::ZERO,
+            engine::MAX_CLIENTS,
         ),
     )
     .await
     .expect("run must return instead of serving");
     let err = result.expect_err("zero interval");
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn a_client_cap_above_the_limit_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let result = timeout(
+        WAIT,
+        engine::run(
+            listener,
+            RandomWalk::new(7, 0),
+            CancellationToken::new(),
+            PING,
+            usize::MAX,
+        ),
+    )
+    .await
+    .expect("run must return instead of serving");
+    assert_eq!(
+        result.expect_err("huge cap").kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn a_zero_client_cap_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let result = timeout(
+        WAIT,
+        engine::run(
+            listener,
+            RandomWalk::new(7, 0),
+            CancellationToken::new(),
+            PING,
+            0,
+        ),
+    )
+    .await
+    .expect("run must return instead of serving");
+    assert_eq!(
+        result.expect_err("zero cap").kind(),
+        io::ErrorKind::InvalidInput
+    );
 }
 
 #[tokio::test]
@@ -198,6 +249,7 @@ async fn shutdown_stops_an_idle_flow() {
         flow,
         shutdown.clone(),
         engine::PING_INTERVAL,
+        engine::MAX_CLIENTS,
     ));
     tokio::task::spawn_blocking(move || second_pulled.recv_timeout(WAIT))
         .await
@@ -237,6 +289,7 @@ async fn the_final_update_reaches_clients_before_the_close() {
             flow.into_iter(),
             CancellationToken::new(),
             engine::PING_INTERVAL,
+            engine::MAX_CLIENTS,
         ));
         let mut client = connect(addr).await;
         let mut bids = std::collections::BTreeSet::new();
@@ -268,4 +321,123 @@ async fn the_final_update_reaches_clients_before_the_close() {
             .expect("server task")
             .expect("server result");
     }
+}
+
+/// Whether the server ends the connection within `WAIT`: a close frame, an
+/// error or the end of the stream all count.
+async fn is_closed(client: &mut Client) -> bool {
+    timeout(WAIT, async {
+        while let Some(Ok(frame)) = client.next().await {
+            if matches!(frame, Message::Close(_)) {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+async fn clients_beyond_the_cap_get_503_until_a_slot_frees() {
+    let (addr, shutdown, server) = start_capped(engine::PING_INTERVAL, 2).await;
+    let mut first = connect(addr).await;
+    let mut second = connect(addr).await;
+    follow(&mut first, 1).await;
+    follow(&mut second, 1).await;
+
+    let refused = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await;
+    let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = refused else {
+        panic!("the third client must be refused with an HTTP response");
+    };
+    assert_eq!(response.status(), 503);
+
+    drop(first);
+    let mut third = timeout(WAIT, async {
+        loop {
+            // The server notices the closed connection asynchronously.
+            if let Ok((client, _)) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await
+            {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a slot must free up after a client leaves");
+    follow(&mut third, 1).await;
+    next_message(&mut second).await;
+    stop(shutdown, server).await;
+}
+
+#[tokio::test]
+async fn a_client_sending_data_or_an_oversized_frame_is_dropped() {
+    let (addr, shutdown, server) = start(engine::PING_INTERVAL).await;
+    let mut bystander = connect(addr).await;
+    for message in [
+        Message::Text("hello".into()),
+        Message::Binary(vec![0_u8; 64 * 1024].into()),
+    ] {
+        let mut client = connect(addr).await;
+        next_message(&mut client).await;
+        // The server may reset the connection mid-send for the big frame.
+        let _ = client.send(message).await;
+        assert!(is_closed(&mut client).await, "the server must drop it");
+    }
+    follow(&mut bystander, 3).await;
+    stop(shutdown, server).await;
+}
+
+/// Completes the handshake by hand, then sends only the header of a masked
+/// text frame that announces 1 MiB. A server without a frame size cap waits
+/// for the payload that never comes; one with a cap rejects the frame on the
+/// header alone. This isolates the cap from the "data is dropped" rule, which
+/// only applies once a whole message has arrived.
+#[tokio::test]
+async fn a_frame_header_announcing_too_much_is_rejected_before_its_payload() {
+    use std::io::{Read, Write};
+
+    let (addr, shutdown, server) = start(engine::PING_INTERVAL).await;
+    let dropped = tokio::task::spawn_blocking(move || {
+        let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream.set_write_timeout(Some(WAIT)).expect("write timeout");
+        let request = format!(
+            "GET /ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).expect("handshake");
+        let mut seen = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).expect("handshake response");
+            assert!(n > 0, "closed during the handshake");
+            seen.extend_from_slice(&chunk[..n]);
+        }
+        assert!(seen.starts_with(b"HTTP/1.1 101"), "upgrade must succeed");
+
+        let mut header = vec![0x81, 0x80 | 127];
+        header.extend_from_slice(&(1_u64 << 20).to_be_bytes());
+        header.extend_from_slice(&[0, 0, 0, 0]);
+        stream.write_all(&header).expect("frame header");
+        // The feed keeps sending updates, so reads never time out; the
+        // deadline is what tells a prompt rejection from a server that waits
+        // for the payload until its liveness check gives up (15 s here).
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match stream.read(&mut chunk) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::ConnectionReset => return true,
+                Err(_) => return false,
+            }
+        }
+        false
+    })
+    .await
+    .expect("client thread");
+    assert!(dropped, "the server must reject the frame on its header");
+    stop(shutdown, server).await;
 }

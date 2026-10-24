@@ -13,7 +13,8 @@
 //! and the connections.
 //!
 //! Settings come from the environment: `ORDERBOOK_ADDR` (default
-//! `127.0.0.1:8080`), `LIVE_RECORD_PATH` (optional; also writes every line
+//! `127.0.0.1:8080`), `ORDERBOOK_MAX_CLIENTS` (cap on feed clients, default
+//! 500), `LIVE_RECORD_PATH` (optional; also writes every line
 //! received to this JSON Lines file, which `replay` can serve, and never
 //! overwrites an existing file; a run that reconnected leaves a gap in it) and
 //! `RUST_LOG` (log filter, default `info`).
@@ -36,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let addr = std::env::var("ORDERBOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let max_clients = engine::max_clients_from_env()?;
     let record: Option<Box<dyn Write + Send>> = match std::env::var("LIVE_RECORD_PATH") {
         Ok(path) => {
             let path = PathBuf::from(path);
@@ -55,7 +57,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot listen on {addr}"))?;
     let shutdown = engine::cancel_on_ctrl_c();
-    serve(listener, URL, record, shutdown, Retry::default()).await?;
+    serve(
+        listener,
+        URL,
+        record,
+        shutdown,
+        Retry::default(),
+        max_clients,
+    )
+    .await?;
     info!("service stopped");
     Ok(())
 }

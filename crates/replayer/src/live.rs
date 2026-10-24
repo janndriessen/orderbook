@@ -194,6 +194,7 @@ pub async fn serve(
     record: Option<Box<dyn Write + Send>>,
     shutdown: CancellationToken,
     retry: Retry,
+    max_clients: usize,
 ) -> io::Result<()> {
     let (steps, mut queue) = mpsc::channel(QUEUE_CAPACITY);
     let recorder = record.map(Recorder::start).transpose()?;
@@ -211,7 +212,14 @@ pub async fn serve(
     // the connections task drops the sender, which that task does on shutdown
     // and whenever it stops for any other reason.
     let flow = iter::from_fn(move || queue.blocking_recv());
-    let served = engine::run(listener, flow, shutdown.clone(), engine::PING_INTERVAL).await;
+    let served = engine::run(
+        listener,
+        flow,
+        shutdown.clone(),
+        engine::PING_INTERVAL,
+        max_clients,
+    )
+    .await;
     shutdown.cancel();
     let fed = feeder.await;
     served?;

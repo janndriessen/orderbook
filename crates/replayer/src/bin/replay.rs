@@ -4,7 +4,8 @@
 //! Settings come from the environment: `REPLAY_PATH` (required, a recording
 //! made by `record`), `REPLAY_SPEED` (`max`, `step`, or a positive integer
 //! factor; default `1`, real time; in `step` mode each Enter on stdin plays one
-//! recorded moment), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`) and
+//! recorded moment), `ORDERBOOK_ADDR` (default `127.0.0.1:8080`),
+//! `ORDERBOOK_MAX_CLIENTS` (cap on feed clients, default 500) and
 //! `RUST_LOG` (log filter, default `info`). When the recording ends the
 //! final book stays served until Ctrl-C. The replay starts at the first full
 //! book snapshot: trades at or before it and top-of-book snapshots (best bid
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .parse::<Speed>()
         .context("REPLAY_SPEED")?;
     let addr = std::env::var("ORDERBOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let max_clients = engine::max_clients_from_env()?;
 
     let recording =
         std::fs::read_to_string(&path).with_context(|| format!("cannot read {path}"))?;
@@ -141,7 +143,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Box::new(paced)
     };
-    engine::run(listener, hold(flow, held), shutdown, engine::PING_INTERVAL).await?;
+    engine::run(
+        listener,
+        hold(flow, held),
+        shutdown,
+        engine::PING_INTERVAL,
+        max_clients,
+    )
+    .await?;
     info!("service stopped");
     Ok(())
 }

@@ -1,7 +1,8 @@
 //! The `orderbook` binary: serves a live BTC-USD book over WebSocket.
 //!
 //! Settings come from the environment: `ORDERBOOK_ADDR` (default
-//! `127.0.0.1:8080`), `ORDERBOOK_SEED` (optional random-walk seed) and
+//! `127.0.0.1:8080`), `ORDERBOOK_SEED` (optional random-walk seed),
+//! `ORDERBOOK_MAX_CLIENTS` (cap on feed clients, default 500) and
 //! `RUST_LOG` (log filter, default `info`).
 
 use anyhow::Context;
@@ -18,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let addr = std::env::var("ORDERBOOK_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let max_clients = engine::max_clients_from_env()?;
     let seed = std::env::var("ORDERBOOK_SEED")
         .ok()
         .map(|value| value.parse::<u64>())
@@ -35,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     info!(seed, "starting random-walk order flow");
     let flow = RandomWalk::new(seed, start_ts);
 
-    engine::run(listener, flow, shutdown, engine::PING_INTERVAL).await?;
+    engine::run(listener, flow, shutdown, engine::PING_INTERVAL, max_clients).await?;
     Ok(())
 }
 

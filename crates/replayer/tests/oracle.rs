@@ -392,6 +392,7 @@ async fn check_feed_end(text: &str) {
         flow,
         engine::CancellationToken::new(),
         engine::PING_INTERVAL,
+        engine::MAX_CLIENTS,
     ));
     let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
         .await

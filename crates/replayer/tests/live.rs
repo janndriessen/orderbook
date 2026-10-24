@@ -483,7 +483,7 @@ async fn follow(
     let shutdown = engine::CancellationToken::new();
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, record, shutdown, QUICK).await }
+        async move { serve(listener, &url, record, shutdown, QUICK, engine::MAX_CLIENTS).await }
     });
     let started = Instant::now();
     let (mut client, _) = timeout(WAIT, connect_async(format!("ws://{addr}/ws")))
@@ -655,7 +655,7 @@ async fn the_market_reopens_when_the_book_did_not_change_during_the_outage() {
     let shutdown = engine::CancellationToken::new();
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, QUICK).await }
+        async move { serve(listener, &url, None, shutdown, QUICK, engine::MAX_CLIENTS).await }
     });
     let (mut client, _) = timeout(WAIT, connect_async(format!("ws://{addr}/ws")))
         .await
@@ -773,6 +773,7 @@ async fn serve_with_broken_recording(broken: Broken) -> (io::Result<()>, bool) {
             Some(Box::new(broken)),
             shutdown.clone(),
             QUICK,
+            engine::MAX_CLIENTS,
         ),
     )
     .await
@@ -813,7 +814,7 @@ async fn shutdown_completes_while_the_source_cannot_be_reached() {
     };
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, retry).await }
+        async move { serve(listener, &url, None, shutdown, retry, engine::MAX_CLIENTS).await }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!service.is_finished(), "the service waits to reconnect");
@@ -843,7 +844,7 @@ async fn shutdown_completes_while_the_source_closes_every_connection() {
     let shutdown = engine::CancellationToken::new();
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, QUICK).await }
+        async move { serve(listener, &url, None, shutdown, QUICK, engine::MAX_CLIENTS).await }
     });
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!service.is_finished(), "the service keeps trying");
@@ -913,7 +914,7 @@ async fn connections_are_reopened_when_no_push_merges_although_lines_keep_coming
     };
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, retry).await }
+        async move { serve(listener, &url, None, shutdown, retry, engine::MAX_CLIENTS).await }
     });
     // A second set of seven connections means the first was given up on.
     for _ in 0..2 * CONNECTIONS {
@@ -988,7 +989,7 @@ async fn books_behind_what_was_replayed_are_progress_not_silence() {
     };
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, retry).await }
+        async move { serve(listener, &url, None, shutdown, retry, engine::MAX_CLIENTS).await }
     });
     for _ in 0..CONNECTIONS {
         let seen = timeout(WAIT, done_rx.recv())
