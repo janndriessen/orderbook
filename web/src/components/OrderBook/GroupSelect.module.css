@@ -1,12 +1,38 @@
 /* Sits in the band above the column headers, at the panel's right edge, where
    the connection status line leaves room. Out of flow so the spread bar stays
-   centred whatever the menu does. */
-.select {
+   centred whatever the menu does. The native arrow cannot be moved, so the
+   wrapper draws a chevron that sits close to the number instead. */
+.menu {
   position: absolute;
   top: var(--top-inset);
   right: var(--space-4);
+  display: flex;
+}
+
+/* Two borders of a square turned 45 degrees. The visible V fills only the
+   square's lower half, so it is lifted by three quarters of its height rather
+   than half to look centred. */
+.menu::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: var(--space-2);
+  width: var(--chevron-size);
+  height: var(--chevron-size);
+  border: solid var(--color-text-muted);
+  border-width: 0 var(--border-width) var(--border-width) 0;
+  transform: translateY(-75%) rotate(45deg);
+  pointer-events: none;
+}
+
+/* Sized to the chosen value rather than the widest option, so the chevron
+   stays next to the number whatever width is picked. */
+.select {
+  appearance: none;
+  field-sizing: content;
   height: calc(var(--header-height) - var(--space-1));
-  padding: 0 var(--space-1);
+  padding: 0 calc(var(--space-2) + var(--chevron-size) + var(--space-1)) 0
+    var(--space-1);
   color: var(--color-text-muted);
   background: var(--color-raised);
   border: var(--border-width) solid var(--color-line-strong);
@@ -19,7 +45,6 @@
   outline: var(--focus-width) solid var(--color-focus);
 }
 
-.select:disabled,
-.select[aria-disabled="true"] {
+.menu:has(.select:disabled, .select[aria-disabled="true"]) {
   opacity: var(--disabled-opacity);
 }
