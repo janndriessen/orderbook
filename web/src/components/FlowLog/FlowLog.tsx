@@ -2,7 +2,8 @@ import { useState } from "react";
 import {
   type LogEntry,
   type LogFilter,
-  MAX_LOG_ENTRIES,
+  MAX_ORDER_ENTRIES,
+  MAX_TRADE_ENTRIES,
   matchesFilter,
 } from "../../feed/log";
 import type { MarketInfo } from "../../protocol/MarketInfo";
@@ -29,9 +30,13 @@ const FILTERS: { value: LogFilter; label: string }[] = [
   { value: "orders", label: "Orders" },
 ];
 
+const isTrade = (entry: LogEntry) => entry.body.type === "trade";
+
 /**
- * Entries that arrived after the frozen view and pass the filter. The count is
- * a lower bound once the whole buffer has turned over since pausing.
+ * Entries that arrived after the frozen view and pass the filter. The two
+ * kinds are capped separately, so a kind may have lost entries newer than the
+ * frozen mark unless it still holds one at or before the mark, or is below its
+ * cap (nothing of it was ever dropped). The count is a lower bound otherwise.
  */
 function newSince(
   entries: readonly LogEntry[],
@@ -43,7 +48,12 @@ function newSince(
   const fresh = index === -1 ? entries : entries.slice(0, index);
   return {
     count: fresh.filter((entry) => matchesFilter(entry, filter)).length,
-    complete: index !== -1 || entries.length < MAX_LOG_ENTRIES,
+    complete: [true, false].every(
+      (trades) =>
+        entries.some((e) => isTrade(e) === trades && e.seq <= mark) ||
+        entries.filter((e) => isTrade(e) === trades).length <
+          (trades ? MAX_TRADE_ENTRIES : MAX_ORDER_ENTRIES),
+    ),
   };
 }
 

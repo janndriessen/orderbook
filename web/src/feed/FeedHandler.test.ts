@@ -9,7 +9,7 @@ import {
   SILENCE_TIMEOUT_MS,
   type Transport,
 } from "./FeedHandler";
-import { MAX_LOG_ENTRIES } from "./log";
+import { MAX_ORDER_ENTRIES } from "./log";
 
 type FakeSocket = {
   closed: boolean;
@@ -422,19 +422,19 @@ describe("FeedHandler", () => {
       });
     });
 
-    it("survives more later events than the log keeps", () => {
+    it("survives more later order events than the log keeps", () => {
       const { handler, last } = setup();
       handler.start();
       last().send(wire(snapshot({ seq: 1 })));
       last().send(
         wire(update({ seq: 2, events: [trade(2, "sell", 999_990)] })),
       );
-      const flood = Array.from({ length: MAX_LOG_ENTRIES + 1 }, (_, i) =>
+      const flood = Array.from({ length: MAX_ORDER_ENTRIES + 1 }, (_, i) =>
         accepted(3 + i),
       );
       last().send(wire(update({ seq: 3, events: flood })));
       expect(handler.getState().log.some((e) => e.body.type === "trade")).toBe(
-        false,
+        true,
       );
       expect(handler.getState().lastTrade).toEqual({
         price: 999_990,

@@ -6,8 +6,14 @@ import type { Side } from "../protocol/Side";
 export type FlowEvent = Exclude<Event, { type: "l2_update" }>;
 export type LogEntry = Envelope<FlowEvent>;
 
-/** Entries kept in memory and rendered; older ones are dropped. */
-export const MAX_LOG_ENTRIES = 500;
+/** Order events (everything but trades) kept in memory and rendered; older ones are dropped. */
+export const MAX_ORDER_ENTRIES = 500;
+
+/**
+ * Trades kept in memory and rendered. Capped apart from the order events so
+ * that the many order events a live book produces cannot push trades out.
+ */
+export const MAX_TRADE_ENTRIES = 100;
 
 export type LogFilter = "all" | "trades" | "orders";
 
@@ -16,8 +22,10 @@ function isFlow(envelope: Envelope<Event>): envelope is LogEntry {
 }
 
 /**
- * Builds the log newest first from events given oldest first. The feed already
- * omits book diffs; they are dropped again here so the log cannot depend on it.
+ * Builds the log newest first from events given oldest first, keeping the
+ * newest {@link MAX_TRADE_ENTRIES} trades and {@link MAX_ORDER_ENTRIES} other
+ * events. The feed already omits book diffs; they are dropped again here so the
+ * log cannot depend on it.
  */
 export function appendEvents(
   log: readonly LogEntry[],
@@ -25,7 +33,14 @@ export function appendEvents(
 ): readonly LogEntry[] {
   const flow = events.filter(isFlow);
   if (flow.length === 0) return log;
-  return [...flow.reverse(), ...log].slice(0, MAX_LOG_ENTRIES);
+  const merged = [...flow.reverse(), ...log];
+  const trades = merged.filter((e) => e.body.type === "trade");
+  const orders = merged.filter((e) => e.body.type !== "trade");
+  // Each list is already newest first; merging by seq restores the common order.
+  return [
+    ...trades.slice(0, MAX_TRADE_ENTRIES),
+    ...orders.slice(0, MAX_ORDER_ENTRIES),
+  ].sort((a, b) => b.seq - a.seq);
 }
 
 export function matchesFilter(entry: LogEntry, filter: LogFilter): boolean {

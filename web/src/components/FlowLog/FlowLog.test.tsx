@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { appendEvents, type LogEntry } from "../../feed/log";
+import { appendEvents, type LogEntry, MAX_TRADE_ENTRIES } from "../../feed/log";
 import {
   accepted,
   canceled,
@@ -169,5 +169,19 @@ describe("FlowLog", () => {
       />,
     );
     expect(screen.getByText("1 new")).toBeInTheDocument();
+  });
+
+  it("marks the count as a lower bound once one kind has been trimmed", async () => {
+    const user = userEvent.setup();
+    const frozen = logOf(trade(1));
+    const { rerender } = render(<FlowLog entries={frozen} market={market} />);
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+    // Far below the combined size of both caps, yet the trade list is full and
+    // has dropped the frozen trade.
+    const flood = Array.from({ length: MAX_TRADE_ENTRIES + 1 }, (_, i) =>
+      trade(2 + i),
+    );
+    rerender(<FlowLog entries={appendEvents(frozen, flood)} market={market} />);
+    expect(screen.getByText(`${MAX_TRADE_ENTRIES}+ new`)).toBeInTheDocument();
   });
 });
