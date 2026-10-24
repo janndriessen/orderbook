@@ -8,11 +8,12 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use axum::extract::ws::Utf8Bytes;
-use protocol::{Envelope, Event, FeedMessage, MarketInfo, Seq};
+use protocol::{Envelope, Event, FeedMessage, MarketInfo, Seq, Ts};
 use tokio::sync::broadcast;
 
 use super::TICK;
 use super::book::AggregatedBook;
+use super::stats::Stats;
 
 /// A serialized feed message. Cloning shares the bytes, so every client gets
 /// the same allocation and the message is serialized once.
@@ -68,6 +69,7 @@ pub struct Publisher {
     /// Consecutive ticks that sent nothing.
     idle_ticks: u32,
     updates: broadcast::Sender<Frame>,
+    stats: Stats,
 }
 
 impl Publisher {
@@ -82,7 +84,13 @@ impl Publisher {
             seq: 0,
             idle_ticks: 0,
             updates,
+            stats: Stats::default(),
         }
+    }
+
+    /// Returns the throughput counters since the last call and resets them.
+    pub fn take_stats(&mut self) -> Stats {
+        std::mem::take(&mut self.stats)
     }
 
     /// Queues the events of one command for the next tick.
@@ -107,7 +115,9 @@ impl Publisher {
     /// `seq`, which therefore skips the numbers of the `L2Update`s.
     pub fn tick(&mut self) -> Option<Seq> {
         let mut events = Vec::new();
+        let mut newest_ts = None;
         for envelope in std::mem::take(&mut self.pending) {
+            newest_ts = newest_ts.max(Some(envelope.ts));
             match envelope.body {
                 Event::L2Update { side, price, qty } => self.book.set(side, price, qty),
                 _ => events.push(envelope),
@@ -128,6 +138,7 @@ impl Publisher {
         let (bids, asks) = self.book.take_changes();
         self.seq += 1;
         self.remember(&events);
+        let event_count = events.len();
         let update = FeedMessage::Update {
             seq: self.seq,
             bids,
@@ -135,7 +146,10 @@ impl Publisher {
             events,
         };
         // No receivers is fine: the update is still part of the feed history.
-        let _ = self.updates.send(encode(&update));
+        let frame = encode(&update);
+        self.stats
+            .record(event_count, frame.as_str().len(), newest_ts, now_micros());
+        let _ = self.updates.send(frame);
         Some(self.seq)
     }
 
@@ -163,6 +177,14 @@ impl Publisher {
         let excess = self.recent.len().saturating_sub(RECENT_EVENTS);
         self.recent.drain(..excess);
     }
+}
+
+/// Wall-clock time in microseconds since the epoch, for the lag statistic
+/// only; it never reaches the feed.
+fn now_micros() -> Ts {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as Ts)
 }
 
 /// Serializes a message for the wire.
@@ -340,6 +362,24 @@ mod tests {
         assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
         let beat = idle(&mut publisher, &mut rx, 1);
         assert_eq!(beat, vec![FeedMessage::Heartbeat { seq: 1 }]);
+    }
+
+    #[test]
+    fn published_updates_are_counted_in_the_stats() {
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        // A timestamp in the far future pins the wall-clock lag to zero.
+        let mut event = accepted(1, 7);
+        event.ts = Ts::MAX;
+        publisher.ingest(vec![event]);
+        publisher.tick();
+        publisher.tick();
+        let wire_bytes = rx.try_recv().expect("an update was sent").as_str().len();
+
+        let mut expected = Stats::default();
+        expected.record(1, wire_bytes, Some(Ts::MAX), 0);
+        assert_eq!(publisher.take_stats(), expected);
+        assert_eq!(publisher.take_stats(), Stats::default(), "window resets");
     }
 
     #[test]

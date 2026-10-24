@@ -2,10 +2,12 @@
 //!
 //! A single Tokio task owns the [`Publisher`]. It collects events as they
 //! arrive, publishes one combined update every [`TICK`] and answers
-//! subscription requests between ticks.
+//! subscription requests between ticks. Every [`stats::WINDOW`] it logs how
+//! many updates, events and bytes it sent.
 
 mod book;
 mod state;
+mod stats;
 
 use std::time::Duration;
 
@@ -61,6 +63,8 @@ pub fn spawn(
         // After a stall, resume at the normal pace instead of firing a burst
         // of catch-up ticks, each of which would be a separate message.
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut summary = time::interval_at(time::Instant::now() + stats::WINDOW, stats::WINDOW);
+        summary.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
@@ -75,6 +79,7 @@ pub fn spawn(
                 _ = ticker.tick() => {
                     publisher.tick();
                 }
+                _ = summary.tick() => publisher.take_stats().log(),
                 Some(reply) = subscriptions.recv() => {
                     // The client may have gone away while waiting; nothing to do.
                     let _ = reply.send(publisher.subscribe());
