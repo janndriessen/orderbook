@@ -19,7 +19,7 @@ use tracing::{debug, info};
 /// scheduling hiccups, not sustained overload. The walk's order flow produces
 /// about 17 commands per second (measured: about 2.3 events per command), so
 /// 4096 slots hold several minutes of output, far more than the publisher's
-/// 100 ms tick needs.
+/// 50 ms tick needs.
 pub const EVENT_QUEUE_CAPACITY: usize = 4096;
 
 /// A matcher that numbers its output.

@@ -47,8 +47,8 @@ const _: () = assert!(
 /// (100,000 events are several megabytes of JSON).
 pub const MAX_EVENTS_PER_UPDATE: usize = 2_000;
 
-/// Messages a client may fall behind by before it is disconnected: about six
-/// seconds at the 100 ms tick.
+/// Messages a client may fall behind by before it is disconnected: about three
+/// seconds at the 50 ms tick.
 pub const BROADCAST_CAPACITY: usize = 64;
 
 /// A new client's starting point and its subscription to what follows.
@@ -354,7 +354,8 @@ mod tests {
     fn idle_ticks_send_one_heartbeat_per_second_without_moving_seq() {
         let mut publisher = Publisher::new(market());
         let mut rx = publisher.subscribe().updates;
-        assert_eq!(SECOND, 10, "one second at the 100 ms tick");
+        assert_eq!(TICK, Duration::from_millis(50));
+        assert_eq!(SECOND, 20, "one second at the 50 ms tick");
         let beat = |seq| vec![FeedMessage::Heartbeat { seq }];
         assert!(idle(&mut publisher, &mut rx, SECOND - 1).is_empty());
         assert_eq!(idle(&mut publisher, &mut rx, 1), beat(0));

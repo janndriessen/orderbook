@@ -21,8 +21,10 @@ use tracing::{debug, warn};
 
 pub use self::state::{Frame, Publisher, Subscription, encode};
 
-/// Time between two updates.
-pub const TICK: Duration = Duration::from_millis(100);
+/// Time between two updates: the batching interval production venues use for
+/// level-2 feeds. A tick sends nothing when nothing changed, so the message
+/// rate follows the source, not this constant.
+pub const TICK: Duration = Duration::from_millis(50);
 
 /// Cloneable access to the running publisher, used by the WebSocket layer.
 #[derive(Debug, Clone)]

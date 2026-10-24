@@ -1,6 +1,7 @@
 //! Market-data feed: aggregated book state and the event log, sent to clients.
 //!
-//! A client receives one `Snapshot`, then an `Update` roughly every 100 ms.
+//! A client receives one `Snapshot`, then an `Update` roughly every 50 ms
+//! while the book changes.
 //! The `seq` of each snapshot and update is exactly one greater than that of
 //! the previous one; on a gap the client discards its state and reconnects,
 //! which starts with a fresh snapshot.
