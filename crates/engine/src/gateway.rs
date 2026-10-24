@@ -2,10 +2,10 @@
 //! front of the engine.
 //!
 //! It checks only what it can know without book state: the bounds of sizes,
-//! prices and order ids, and order id reuse. Whether an order exists or would
-//! trade is the engine's call.
+//! prices and order ids, and order id reuse within a window. Whether an order
+//! exists or would trade is the engine's call.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use protocol::{Command, Envelope, OrderId, OrderType, Price, Qty, Seq, Ts};
 
@@ -22,6 +22,11 @@ pub const MAX_PRICE: Price = (1 << 53) - 1;
 /// the protocol's bound for values JavaScript represents exactly.
 pub const MAX_ORDER_ID: OrderId = (1 << 53) - 1;
 
+/// How many of the highest `Place` order ids the gateway remembers. Ids may
+/// arrive somewhat out of order, so the window leaves room for a late one
+/// while keeping memory fixed however long the service runs.
+pub const ORDER_ID_WINDOW: usize = 1_000;
+
 /// Why the gateway refused a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GatewayReject {
@@ -37,21 +42,32 @@ pub enum GatewayReject {
     /// A `Place` already used this order id.
     #[error("order id {0} was already used")]
     DuplicateOrderId(OrderId),
+    /// The window of remembered ids is full and this `Place` id is smaller
+    /// than all of them, so it cannot be told apart from a reused one.
+    #[error("order id {0} is below the window of the {ORDER_ID_WINDOW} highest ids")]
+    OrderIdTooOld(OrderId),
 }
 
 /// Validates commands and numbers the ones that pass.
 ///
 /// Command sequence numbers run gap-free from 1 over the accepted commands; a
-/// reject consumes none. The set of used order ids grows until restart.
+/// reject consumes none.
 ///
-/// The set is only ever looked up by id, never iterated, so its unspecified
-/// hash order cannot affect determinism.
+/// Only the [`ORDER_ID_WINDOW`] highest `Place` order ids are remembered. A
+/// `Place` passes the id check if its id is unused and, once the window is
+/// full, larger than the smallest remembered id. Ids that fell out of the
+/// window are refused rather than forgotten, so none is ever accepted twice.
 #[derive(Debug, Default)]
 pub struct Gateway {
     /// Sequence number of the last accepted command, 0 before the first.
     last_seq: Seq,
-    /// Ids of every `Place` seen, including rejected ones.
-    seen: HashSet<OrderId>,
+    /// The highest `Place` ids seen, at most [`ORDER_ID_WINDOW`] of them. A
+    /// `Place` refused for its size or price is remembered and counts towards
+    /// the window like any other: an id is unique once sent, and the only
+    /// submitter is the service's own translator, so a stream of invalid
+    /// `Place`s with huge ids that would push the floor up is not a case to
+    /// guard against here.
+    seen: BTreeSet<OrderId>,
 }
 
 impl Gateway {
@@ -65,9 +81,10 @@ impl Gateway {
     ///
     /// Every command's order id must be within [`MAX_ORDER_ID`]. Every `Place`
     /// uses up its order id, even one refused by a later check, because a
-    /// client order id is unique once sent. A `Replace` and a `Cancel` name an
-    /// existing order, so the gateway does not check whether their ids were
-    /// used; whether the order rests is for the engine to decide.
+    /// client order id is unique once sent (within [`ORDER_ID_WINDOW`]). A
+    /// `Replace` and a `Cancel` name an existing order, so the gateway does not
+    /// check whether their ids were used; whether the order rests is for the
+    /// engine to decide.
     pub fn submit(&mut self, ts: Ts, command: Command) -> Result<Envelope<Command>, GatewayReject> {
         let (Command::Place { order_id, .. }
         | Command::Replace { order_id, .. }
@@ -82,8 +99,15 @@ impl Gateway {
                 qty,
                 ..
             } => {
-                if !self.seen.insert(order_id) {
+                if self.seen.contains(&order_id) {
                     return Err(GatewayReject::DuplicateOrderId(order_id));
+                }
+                if self.seen.len() >= ORDER_ID_WINDOW && self.seen.first() > Some(&order_id) {
+                    return Err(GatewayReject::OrderIdTooOld(order_id));
+                }
+                self.seen.insert(order_id);
+                if self.seen.len() > ORDER_ID_WINDOW {
+                    self.seen.pop_first();
                 }
                 check_qty(qty)?;
                 if let OrderType::Limit { price, .. } = order_type {
@@ -201,6 +225,88 @@ mod tests {
             gateway.submit(2, market(7, 5)),
             Err(GatewayReject::DuplicateOrderId(7))
         );
+    }
+
+    /// Fills the window with ids `1..=ORDER_ID_WINDOW`.
+    fn full_window() -> Gateway {
+        let mut gateway = Gateway::new();
+        for id in 1..=ORDER_ID_WINDOW as OrderId {
+            assert!(gateway.submit(0, place(id, 100, 5)).is_ok());
+        }
+        gateway
+    }
+
+    #[test]
+    fn an_id_below_the_full_window_is_too_old() {
+        let mut gateway = full_window();
+        // Id 1 is the smallest kept, so it is a duplicate; once a higher id
+        // pushes it out, it is merely too old.
+        assert_eq!(
+            gateway.submit(0, place(1, 100, 5)),
+            Err(GatewayReject::DuplicateOrderId(1))
+        );
+        let next = ORDER_ID_WINDOW as OrderId + 1;
+        assert!(gateway.submit(0, place(next, 100, 5)).is_ok());
+        assert_eq!(
+            gateway.submit(0, place(1, 100, 5)),
+            Err(GatewayReject::OrderIdTooOld(1))
+        );
+        assert_eq!(
+            gateway.submit(0, place(2, 100, 5)),
+            Err(GatewayReject::DuplicateOrderId(2))
+        );
+    }
+
+    #[test]
+    fn duplicates_inside_the_window_are_still_duplicates() {
+        let mut gateway = full_window();
+        assert_eq!(
+            gateway.submit(0, place(500, 100, 5)),
+            Err(GatewayReject::DuplicateOrderId(500))
+        );
+    }
+
+    #[test]
+    fn an_unused_id_inside_the_window_is_accepted_out_of_order() {
+        // Full window whose smallest kept id is 2: id 3 is unused and above it.
+        let mut gateway = Gateway::new();
+        for id in (2..=2 * ORDER_ID_WINDOW as OrderId).filter(|id| id % 2 == 0) {
+            assert!(gateway.submit(0, place(id, 100, 5)).is_ok());
+        }
+        assert!(gateway.submit(0, place(3, 100, 5)).is_ok());
+    }
+
+    #[test]
+    fn a_place_rejected_for_its_size_counts_towards_the_window() {
+        let mut gateway = Gateway::new();
+        for id in 1..ORDER_ID_WINDOW as OrderId {
+            assert!(gateway.submit(0, place(id, 100, 5)).is_ok());
+        }
+        let last = ORDER_ID_WINDOW as OrderId;
+        assert_eq!(
+            gateway.submit(0, place(last, 100, 0)),
+            Err(GatewayReject::InvalidQty(0))
+        );
+        // The rejected id filled the window, so an id below its smallest is
+        // too old, and the rejected id itself is a duplicate.
+        assert_eq!(
+            gateway.submit(0, place(0, 100, 5)),
+            Err(GatewayReject::OrderIdTooOld(0))
+        );
+        assert_eq!(
+            gateway.submit(0, place(last, 100, 5)),
+            Err(GatewayReject::DuplicateOrderId(last))
+        );
+    }
+
+    #[test]
+    fn remembered_ids_never_exceed_the_window() {
+        let mut gateway = Gateway::new();
+        for id in 1..=3 * ORDER_ID_WINDOW as OrderId {
+            gateway.submit(0, place(id, 100, 5)).unwrap();
+            assert!(gateway.seen.len() <= ORDER_ID_WINDOW);
+        }
+        assert_eq!(gateway.seen.len(), ORDER_ID_WINDOW);
     }
 
     #[test]
