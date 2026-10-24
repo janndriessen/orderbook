@@ -1,6 +1,7 @@
 //! The order book: resting orders grouped into price levels per side.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use protocol::{OrderId, Price, Qty, Side, TimeInForce};
 
@@ -59,6 +60,34 @@ pub enum BookError {
     DuplicateOrderId(OrderId),
 }
 
+/// Multiplicative hasher for the order index, whose keys are integer ids.
+///
+/// Lookups dominate the matching path and std's SipHash costs more than the
+/// rest of a lookup. SipHash's protection against crafted colliding keys is
+/// not needed here because order ids reach the book only through our own
+/// gateway; if ids could ever come from untrusted clients, revisit this.
+/// The multiplication spreads sequential ids (the gateway's ids are counters),
+/// but ids that are all multiples of a large power of two would use only part
+/// of the table, so the hasher suits counter-like ids.
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    fn write_u64(&mut self, id: u64) {
+        self.0 = (self.0.rotate_left(5) ^ id).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
 /// Both sides of the book.
 ///
 /// Levels are kept in sorted maps, so iteration order is defined by price.
@@ -68,7 +97,7 @@ pub enum BookError {
 pub struct OrderBook {
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,
-    orders: HashMap<OrderId, RestingOrder>,
+    orders: HashMap<OrderId, RestingOrder, BuildHasherDefault<IdHasher>>,
 }
 
 impl OrderBook {
