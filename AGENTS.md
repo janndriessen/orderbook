@@ -25,6 +25,7 @@ web/            React frontend; web/src/protocol/ holds the generated TS types
 scenarios/      hand-written deterministic test cases
 data/           recorded sessions (gitignored)
 docs/           architecture notes and diagrams
+scripts/        small dependency-free tools (Node)
 ```
 
 Crates appear as they are built; the layout above is the target.

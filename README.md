@@ -149,6 +149,7 @@ crates/replayer/   loads a recording into commands and paces them for the servic
 web/               React frontend; src/protocol/ holds the generated TypeScript types
 scenarios/         hand-written deterministic test cases (JSON), run by the matching crate's tests
 docs/              diagrams
+scripts/           small dependency-free tools (Node): `feed-latency.mjs` measures update rate, data rate and lag as a client sees them
 ```
 
 Planned, not yet present: `data/` (recorded sessions, gitignored).
