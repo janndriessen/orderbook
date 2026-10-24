@@ -1,4 +1,5 @@
 import type { MarketInfo } from "../protocol/MarketInfo";
+import type { TradingStatus } from "../protocol/TradingStatus";
 import { applyMessage, type BookState } from "./book";
 import { parseFeedMessage } from "./guard";
 import {
@@ -34,6 +35,12 @@ export type FeedState = {
    * sequence numbers across updates reset when this changes.
    */
   restarts: number;
+  /**
+   * Whether the market takes new orders: set by each snapshot, then by the
+   * newest `trading_status_changed` event of each update. `null` until the
+   * first snapshot. Only meaningful while `status` is `live`.
+   */
+  tradingStatus: TradingStatus | null;
 };
 
 export type Connection = { close(): void };
@@ -80,6 +87,7 @@ const INITIAL: FeedState = {
   log: [],
   lastTrade: null,
   restarts: 0,
+  tradingStatus: null,
 };
 
 export const webSocketTransport: Transport = (url, { onMessage, onClose }) => {
@@ -214,6 +222,11 @@ export class FeedHandler {
       log: appendEvents(snapshot ? [] : this.#state.log, message.events),
       lastTrade: newestTrade(message.events) ?? this.#state.lastTrade,
       restarts: this.#state.restarts + (restarted ? 1 : 0),
+      tradingStatus: message.events.reduce<TradingStatus | null>(
+        (current, { body }) =>
+          body.type === "trading_status_changed" ? body.status : current,
+        snapshot ? message.trading_status : this.#state.tradingStatus,
+      ),
     });
   }
 

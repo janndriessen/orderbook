@@ -43,6 +43,7 @@
 
   --color-status-live: var(--color-bid);
   --color-status-wait: var(--color-event-trade);
+  --color-status-halted: var(--color-event-trade);
   --color-focus: #8cc4ff;
 
   /* Type. Numbers are monospaced; labels use the system UI face. */

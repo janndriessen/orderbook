@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { accepted, level, snapshot, trade, update } from "../test/fixtures";
+import {
+  accepted,
+  level,
+  snapshot,
+  statusChanged,
+  trade,
+  update,
+} from "../test/fixtures";
 import {
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
@@ -403,6 +410,51 @@ describe("FeedHandler", () => {
     expect(handler.getState()).toMatchObject({
       status: "connecting",
       market: null,
+    });
+  });
+
+  describe("trading status", () => {
+    it("is null before the snapshot, then the snapshot's", () => {
+      const { handler, last } = setup();
+      handler.start();
+      expect(handler.getState().tradingStatus).toBeNull();
+      last().send(wire(snapshot({ seq: 1, trading_status: "halted" })));
+      expect(handler.getState().tradingStatus).toBe("halted");
+    });
+
+    it("follows status events, the newest in an update winning", () => {
+      const { handler, last } = setup();
+      handler.start();
+      last().send(wire(snapshot({ seq: 1 })));
+      last().send(
+        wire(
+          update({ seq: 2, events: [statusChanged(1, "halted"), accepted(2)] }),
+        ),
+      );
+      expect(handler.getState().tradingStatus).toBe("halted");
+      last().send(wire(update({ seq: 3, events: [accepted(3)] })));
+      expect(handler.getState().tradingStatus).toBe("halted");
+      last().send(
+        wire(
+          update({
+            seq: 4,
+            events: [statusChanged(4, "open"), statusChanged(4, "halted")],
+          }),
+        ),
+      );
+      expect(handler.getState().tradingStatus).toBe("halted");
+      last().send(wire(update({ seq: 5, events: [statusChanged(5, "open")] })));
+      expect(handler.getState().tradingStatus).toBe("open");
+    });
+
+    it("is replaced by a resync snapshot", () => {
+      const { handler, last, waitForReconnect } = setup();
+      handler.start();
+      last().send(wire(snapshot({ seq: 1, trading_status: "halted" })));
+      last().drop();
+      waitForReconnect();
+      last().send(wire(snapshot({ seq: 5, trading_status: "open" })));
+      expect(handler.getState().tradingStatus).toBe("open");
     });
   });
 

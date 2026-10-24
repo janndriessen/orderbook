@@ -22,7 +22,11 @@
   background: var(--color-status-live);
 }
 
-.status:not([data-status="live"]) .dot {
+.status[data-status="halted"] .dot {
+  background: var(--color-status-halted);
+}
+
+.status:is([data-status="connecting"], [data-status="reconnecting"]) .dot {
   animation: pulse var(--duration-pulse) ease-in-out infinite;
 }
 
