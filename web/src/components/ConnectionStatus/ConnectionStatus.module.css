@@ -31,3 +31,12 @@
     opacity: var(--pulse-low-opacity);
   }
 }
+
+/* In the stacked layout (same width as in App.module.css) the log scrolls up
+   under the top band, so the status scrolls away with the book instead of
+   covering the log's filters. */
+@media (width < 1064px) {
+  .status {
+    position: absolute;
+  }
+}
