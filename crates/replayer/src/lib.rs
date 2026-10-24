@@ -1350,6 +1350,35 @@ mod tests {
     }
 
     #[test]
+    fn skipped_books_with_a_standing_clock_are_not_progress() {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        let mut number = 0;
+        let mut feed = |flow: &mut L2Flow, lines: &[String]| {
+            for line in lines {
+                number += 1;
+                flow.line(number, line).expect("skipped, not an error");
+            }
+        };
+        feed(
+            &mut flow,
+            &[both(2_000, "1.0"), both(3_000, "0.9")].concat(),
+        );
+        flow.reset_connection();
+        let before = flow.progress();
+        feed(&mut flow, &both(2_500, "0.7"));
+        let catching_up = flow.progress();
+        assert!(catching_up > before, "a first stale book is progress");
+        feed(&mut flow, &both(2_600, "0.7"));
+        let later = flow.progress();
+        assert!(later > catching_up, "a later time is progress");
+        feed(
+            &mut flow,
+            &[both(2_600, "0.6"), both(2_600, "0.5")].concat(),
+        );
+        assert_eq!(flow.progress(), later, "a time that stands still is not");
+    }
+
+    #[test]
     fn a_book_older_than_the_released_push_is_backwards() {
         let mut flow = L2Flow::new(engine::market(), 2);
         for (number, line) in both(1_000, "1.0").iter().enumerate() {

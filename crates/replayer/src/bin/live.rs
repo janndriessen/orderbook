@@ -4,10 +4,12 @@
 //! It connects the way `record` does (seven connections, see the
 //! `hyperliquid_recorder` library), assembles the `l2` lines into pushes and
 //! sends the commands to the engine as they come, without pacing. When any
-//! connection fails (closed, lost, silent for 30 seconds) all of them are
-//! opened again after a pause that starts at 1 second and doubles up to 30
-//! seconds; the engine keeps its book meanwhile and catches up with the first
-//! push of the new connections. Ctrl-C stops the service and the connections.
+//! connection fails (closed, lost, 30 seconds without a full book snapshot,
+//! 5 seconds without an `l2` message on one of them, or 10 seconds without a
+//! push merging or a stale book being skipped) all of them are opened again
+//! after a pause that starts at 1 second and doubles up to 30 seconds; the
+//! engine keeps its book meanwhile and catches up with the first push of the
+//! new connections. Ctrl-C stops the service and the connections.
 //!
 //! Settings come from the environment: `ORDERBOOK_ADDR` (default
 //! `127.0.0.1:8080`), `LIVE_RECORD_PATH` (optional; also writes every line

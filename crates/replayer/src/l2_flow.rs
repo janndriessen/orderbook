@@ -30,6 +30,8 @@ type Commands = Vec<(Ts, Command)>;
 pub struct L2Stats {
     /// Whether a push has merged yet, which starts the book.
     pub started: bool,
+    /// How many pushes have merged and been released, across resets.
+    pub merged_pushes: usize,
     /// How far the translator's book is known to differ from the source's.
     pub divergence: Divergence,
     /// Trades at or before the first push that merged, which were left out:
@@ -113,6 +115,12 @@ pub struct L2Flow {
     /// books at or before it are then skipped instead of an error.
     recovering: bool,
     warned_stale: bool,
+    /// Each grouping's latest skipped book time since the last reset, to tell
+    /// a source catching up from one whose clock stands still.
+    stale_latest: BTreeMap<Grouping, Ts>,
+    /// Skipped books whose time was later than any skipped before from the
+    /// same grouping.
+    catching_up: usize,
     /// Whether the push in `released` merged when it was released.
     released_merged: bool,
     /// The time of the first push that merged since the connections were
@@ -142,6 +150,8 @@ impl L2Flow {
             released_merged: false,
             recovering: false,
             warned_stale: false,
+            stale_latest: BTreeMap::new(),
+            catching_up: 0,
             first_merged: None,
             trades: Vec::new(),
             out: Vec::new(),
@@ -257,6 +267,14 @@ impl L2Flow {
             // New connections of a source whose clock stepped back: its books
             // are skipped until its time passes what was already replayed.
             self.stats.stale_books += 1;
+            if self
+                .stale_latest
+                .get(&grouping)
+                .is_none_or(|&seen| ts > seen)
+            {
+                self.stale_latest.insert(grouping, ts);
+                self.catching_up += 1;
+            }
             if !std::mem::replace(&mut self.warned_stale, true) {
                 warn!(ts, done_through = ?self.done_through, "the source's time is behind what was already replayed, skipping its books until it catches up");
             }
@@ -311,10 +329,22 @@ impl L2Flow {
         self.released = None;
         self.recovering = true;
         self.warned_stale = false;
+        self.stale_latest.clear();
         self.last_merged = None;
         self.first_merged = None;
         self.trades.clear();
         self.out.clear();
+    }
+
+    /// How many pushes have merged and been released so far plus how many
+    /// books were skipped for being behind what was already replayed while
+    /// their grouping's time moved forward. A caller that sees it stand still
+    /// while lines keep coming knows the groupings' times no longer match, or
+    /// that a grouping's clock is frozen. A skipped book with a later time
+    /// than the grouping's earlier ones counts because the source is only
+    /// catching up with a clock that stepped back.
+    pub fn progress(&self) -> usize {
+        self.stats.merged_pushes + self.catching_up
     }
 
     /// Whether a push has merged yet.
@@ -409,6 +439,7 @@ impl L2Flow {
             self.stats.dropped_trades += released.len();
         }
         self.stats.started = true;
+        self.stats.merged_pushes += 1;
         self.last_merged = Some(ts);
         self.out.extend(self.translator.on_snapshot(&merged.book));
     }

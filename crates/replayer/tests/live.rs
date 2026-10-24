@@ -36,6 +36,7 @@ const WAIT: Duration = Duration::from_secs(10);
 const QUICK: Retry = Retry {
     initial: Duration::from_millis(20),
     max: Duration::from_millis(100),
+    progress: WAIT,
 };
 
 type Levels = BTreeMap<Price, u64>;
@@ -648,6 +649,7 @@ async fn shutdown_completes_while_the_source_cannot_be_reached() {
     let retry = Retry {
         initial: Duration::from_secs(3600),
         max: Duration::from_secs(3600),
+        progress: WAIT,
     };
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
@@ -689,4 +691,158 @@ async fn shutdown_completes_while_the_source_closes_every_connection() {
         .expect("service task")
         .expect("service result");
     closer.abort();
+}
+
+#[tokio::test]
+async fn connections_are_reopened_when_no_push_merges_although_lines_keep_coming() {
+    let fixture = recording();
+    let mut round = whole_round(&fixture);
+    // One grouping's times are 1 ms off everyone else's, so no push is ever
+    // complete, while every connection keeps sending.
+    let shifted = *round
+        .lines
+        .keys()
+        .find(|&&key| key != MAIN && key != EXACT)
+        .expect("a grouping that is its own");
+    round.lines.insert(
+        shifted,
+        fixture.books[&shifted]
+            .iter()
+            .map(|book| full_book(book, book.ts + 1_000))
+            .collect(),
+    );
+    assert!(!round.trades.is_empty(), "there are trades to be held");
+    let round = Arc::new(round);
+
+    // Accepts every connection, sends the round and keeps the socket open.
+    let source = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("ws://{}", source.local_addr().expect("addr"));
+    let (accepted, mut accepted_rx) = mpsc::unbounded_channel();
+    let fake = tokio::spawn(async move {
+        loop {
+            let (tcp, _) = source.accept().await.expect("accepts");
+            let mut socket = accept_async(tcp).await.expect("handshakes");
+            accepted.send(()).expect("test is listening");
+            let round = Arc::clone(&round);
+            tokio::spawn(async move {
+                let (key, main) = subscribed(&mut socket).await;
+                let from = if key == EXACT { MAIN } else { key };
+                let lines = if main {
+                    with_trades(&round.lines[&from], &round.trades)
+                } else {
+                    round.lines[&from].iter().map(|l| l.text.clone()).collect()
+                };
+                for line in lines {
+                    if socket.send(Frame::text(line)).await.is_err() {
+                        return;
+                    }
+                }
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let shutdown = engine::CancellationToken::new();
+    let retry = Retry {
+        progress: Duration::from_millis(500),
+        ..QUICK
+    };
+    let service = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { serve(listener, &url, None, shutdown, retry).await }
+    });
+    // A second set of seven connections means the first was given up on.
+    for _ in 0..2 * CONNECTIONS {
+        timeout(WAIT, accepted_rx.recv())
+            .await
+            .expect("the connections were not opened again")
+            .expect("counted");
+    }
+    shutdown.cancel();
+    timeout(WAIT, service)
+        .await
+        .expect("the service did not stop")
+        .expect("service task")
+        .expect("service result");
+    fake.abort();
+}
+
+#[tokio::test]
+async fn books_behind_what_was_replayed_are_progress_not_silence() {
+    let fixture = recording();
+    let round = Arc::new(whole_round(&fixture));
+
+    // The first seven connections get the round at once and then go silent, so
+    // the watchdog opens the next seven, whose clock is back at the start: all
+    // their books but the last are behind what the flow has replayed. Those
+    // arrive over longer than `progress`, and the number of connections
+    // accepted is read when each is done.
+    let source = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("ws://{}", source.local_addr().expect("addr"));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (done, mut done_rx) = mpsc::unbounded_channel();
+    let fake = tokio::spawn({
+        let accepted = Arc::clone(&accepted);
+        async move {
+            loop {
+                let (tcp, _) = source.accept().await.expect("accepts");
+                let mut socket = accept_async(tcp).await.expect("handshakes");
+                let index = accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (round, accepted, done) =
+                    (Arc::clone(&round), Arc::clone(&accepted), done.clone());
+                tokio::spawn(async move {
+                    let (key, main) = subscribed(&mut socket).await;
+                    let from = if key == EXACT { MAIN } else { key };
+                    let lines = if main {
+                        with_trades(&round.lines[&from], &round.trades)
+                    } else {
+                        round.lines[&from].iter().map(|l| l.text.clone()).collect()
+                    };
+                    let slow = index >= CONNECTIONS;
+                    for line in lines {
+                        if socket.send(Frame::text(line)).await.is_err() {
+                            break;
+                        }
+                        if slow {
+                            tokio::time::sleep(Duration::from_millis(60)).await;
+                        }
+                    }
+                    if slow {
+                        let _ = done.send(accepted.load(std::sync::atomic::Ordering::SeqCst));
+                    }
+                    std::future::pending::<()>().await;
+                });
+            }
+        }
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let shutdown = engine::CancellationToken::new();
+    let retry = Retry {
+        progress: Duration::from_millis(500),
+        ..QUICK
+    };
+    let service = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { serve(listener, &url, None, shutdown, retry).await }
+    });
+    for _ in 0..CONNECTIONS {
+        let seen = timeout(WAIT, done_rx.recv())
+            .await
+            .expect("the second set of connections finished sending")
+            .expect("counted");
+        assert_eq!(
+            seen,
+            2 * CONNECTIONS,
+            "the connections were opened again while the source was catching up"
+        );
+    }
+    shutdown.cancel();
+    timeout(WAIT, service)
+        .await
+        .expect("the service did not stop")
+        .expect("service task")
+        .expect("service result");
+    fake.abort();
 }

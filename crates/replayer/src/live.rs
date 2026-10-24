@@ -3,7 +3,8 @@
 //!
 //! Nothing is paced: a command goes to the engine the moment the push it
 //! belongs to is complete. When any of the seven connections fails (closed,
-//! lost, silent for too long, or a message that does not apply), all of them
+//! lost, silent for too long, a message that does not apply, or no push has
+//! merged for too long although lines keep coming), all of them
 //! are dropped and opened again after a pause that doubles up to a limit. What
 //! was learned from the old connections is forgotten, but the flow keeps its
 //! translator, whose book mirrors what the engine holds, so the first push of
@@ -18,7 +19,7 @@ use engine::{CancellationToken, Step};
 use hyperliquid_recorder::{CONNECTIONS, Connections};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tracing::{info, warn};
 
 use crate::L2Flow;
@@ -31,8 +32,11 @@ const QUEUE_CAPACITY: usize = 4096;
 /// How long opening the seven connections may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The pause before connecting again: it starts at `initial`, doubles after
-/// each failure up to `max`, and starts over once a connection has produced
+/// How the connections are opened again after a failure, and when a
+/// connection that stays up counts as failed.
+///
+/// The pause before connecting again starts at `initial`, doubles after each
+/// failure up to `max`, and starts over once a connection has produced
 /// commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retry {
@@ -40,6 +44,15 @@ pub struct Retry {
     pub initial: Duration,
     /// The longest pause.
     pub max: Duration,
+    /// How long the connections may stay up without a push merging, counted
+    /// from when they are open and from each merged push. Books skipped for
+    /// being behind what was already replayed count as well while their
+    /// grouping's time moves forward: the source is catching up, whereas a
+    /// frozen clock repeating the same time is not. The source's own output
+    /// is what a consumer must watch: with every connection sending but the
+    /// groupings' times never matching, no push completes, the served book
+    /// freezes and the trades held for the next push pile up.
+    pub progress: Duration,
 }
 
 impl Default for Retry {
@@ -47,6 +60,8 @@ impl Default for Retry {
         Self {
             initial: Duration::from_secs(1),
             max: Duration::from_secs(30),
+            // About twenty pushes at the source's cadence of half a second.
+            progress: Duration::from_secs(10),
         }
     }
 }
@@ -198,7 +213,7 @@ async fn feed_loop(
             record,
             &mut number,
             &mut backoff,
-            retry.initial,
+            retry,
         );
         let outcome = tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
@@ -224,7 +239,10 @@ async fn feed_loop(
 
 /// Opens the connections and feeds their lines through `flow` until one
 /// fails. `number` counts the lines of all connections so far, and `backoff`
-/// is put back to `initial` when lines make commands.
+/// is put back to `retry.initial` when lines make commands. A connection that
+/// merges no push and skips no stale book with a later time than before for
+/// `retry.progress` fails, the first push included: opening is done by then,
+/// and the first push needs only one book per grouping.
 async fn connected(
     url: &str,
     flow: &mut L2Flow,
@@ -232,7 +250,7 @@ async fn connected(
     record: &mut Option<Recorder>,
     number: &mut usize,
     backoff: &mut Duration,
-    initial: Duration,
+    retry: Retry,
 ) -> io::Result<Outcome> {
     let mut connections = match timeout(CONNECT_TIMEOUT, Connections::connect(url)).await {
         Ok(Ok(connections)) => connections,
@@ -240,10 +258,18 @@ async fn connected(
         Err(_) => return Ok(Outcome::Failed("connecting took too long".to_owned())),
     };
     info!("connected to the source");
+    let mut progressed = flow.progress();
+    let mut deadline = Instant::now() + retry.progress;
     loop {
-        let value = match connections.next().await {
-            Ok(value) => value,
-            Err(err) => return Ok(Outcome::Failed(err.to_string())),
+        let value = match timeout_at(deadline, connections.next()).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(err)) => return Ok(Outcome::Failed(err.to_string())),
+            Err(_) => {
+                return Ok(Outcome::Failed(format!(
+                    "no push merged for {:?} although the connections are open",
+                    retry.progress
+                )));
+            }
         };
         let text = value.to_string();
         if let Some(recorder) = record.as_mut() {
@@ -254,8 +280,10 @@ async fn connected(
             Ok(commands) => commands,
             Err(err) => return Ok(Outcome::Failed(err.to_string())),
         };
+        let moved = flow.progress() > progressed;
+        progressed = flow.progress();
         if !commands.is_empty() {
-            *backoff = initial;
+            *backoff = retry.initial;
         }
         for (ts, command) in commands {
             let step = Step {
@@ -266,6 +294,11 @@ async fn connected(
             if steps.send(step).await.is_err() {
                 return Ok(Outcome::EngineGone);
             }
+        }
+        // Reset only once the engine has the commands: waiting for it to
+        // catch up is not the source's silence.
+        if moved {
+            deadline = Instant::now() + retry.progress;
         }
     }
 }
