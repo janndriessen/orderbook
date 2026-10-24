@@ -3,4 +3,7 @@
 /**
  * Why an order was rejected.
  */
-export type RejectReason = "post_only_would_cross" | "no_liquidity";
+export type RejectReason =
+  | "post_only_would_cross"
+  | "no_liquidity"
+  | "trading_halted";

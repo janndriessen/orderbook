@@ -51,6 +51,31 @@ pub enum Command {
         /// Open quantity after the change.
         qty: Qty,
     },
+    /// Open or halt trading.
+    ///
+    /// Carries no order id and is not checked for values. While the market is
+    /// halted only cancels are accepted; setting the status it already has
+    /// changes nothing.
+    SetTradingStatus {
+        /// The status to switch to.
+        status: TradingStatus,
+    },
+}
+
+/// Whether the market accepts new orders.
+///
+/// Production venues publish such a status next to their market data; a halt
+/// stops trading while resting orders stay on the book and can be canceled.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum TradingStatus {
+    /// New orders and replaces are accepted.
+    #[default]
+    Open,
+    /// Only cancels are accepted; places and replaces are refused with
+    /// `TradingHalted`.
+    Halted,
 }
 
 /// How an order is priced.
@@ -146,6 +171,25 @@ mod tests {
             },
             json!({ "type": "replace", "order_id": 7, "price": 100_300, "qty": 2 }),
         );
+    }
+
+    #[test]
+    fn set_trading_status_has_a_fixed_wire_form() {
+        for (status, wire) in [
+            (TradingStatus::Open, "open"),
+            (TradingStatus::Halted, "halted"),
+        ] {
+            assert_wire(
+                Command::SetTradingStatus { status },
+                json!({ "type": "set_trading_status", "status": wire }),
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_trading_status_is_rejected() {
+        let wire = json!({ "type": "set_trading_status", "status": "paused" });
+        assert!(error_of::<Command>(wire).contains("unknown variant `paused`"));
     }
 
     #[test]

@@ -376,6 +376,7 @@ mod tests {
                 Event::Rejected { .. } | Event::CancelRejected { .. } => {
                     panic!("the walk never rejects a request")
                 }
+                Event::TradingStatusChanged { .. } => panic!("the walk never halts trading"),
                 Event::Replaced {
                     order_id,
                     price,

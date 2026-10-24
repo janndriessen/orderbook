@@ -5,6 +5,7 @@ import {
   l2,
   rejected,
   snapshot,
+  statusChanged,
   trade,
   update,
 } from "../test/fixtures";
@@ -33,7 +34,28 @@ describe("parseFeedMessage", () => {
     expect(parseFeedMessage(json(msg))).toEqual(msg);
   });
 
-  it.each(["post_only_would_cross", "no_liquidity"] as const)(
+  it("accepts a trading status change and a snapshot's status", () => {
+    const snap = snapshot({
+      trading_status: "halted",
+      events: [statusChanged(1, "halted")],
+    });
+    expect(parseFeedMessage(json(snap))).toEqual(snap);
+  });
+
+  it("rejects an unknown trading status", () => {
+    const withStatus = (status: unknown) =>
+      json({ ...snapshot(), trading_status: status });
+    expect(parseFeedMessage(withStatus("paused"))).toBeNull();
+    expect(parseFeedMessage(withStatus(undefined))).toBeNull();
+    const event = { type: "trading_status_changed", status: "paused" };
+    expect(
+      parseFeedMessage(
+        json({ ...update(), events: [{ seq: 1, ts: 1, body: event }] }),
+      ),
+    ).toBeNull();
+  });
+
+  it.each(["post_only_would_cross", "no_liquidity", "trading_halted"] as const)(
     "accepts a rejected order with reason %s",
     (reason) => {
       const msg = update({ events: [rejected(1, reason)] });
@@ -41,13 +63,14 @@ describe("parseFeedMessage", () => {
     },
   );
 
-  it.each(["unknown_order", "post_only_would_cross"] as const)(
-    "accepts a cancel rejection with reason %s",
-    (reason) => {
-      const msg = update({ events: [cancelRejected(1, reason)] });
-      expect(parseFeedMessage(json(msg))).toEqual(msg);
-    },
-  );
+  it.each([
+    "unknown_order",
+    "post_only_would_cross",
+    "trading_halted",
+  ] as const)("accepts a cancel rejection with reason %s", (reason) => {
+    const msg = update({ events: [cancelRejected(1, reason)] });
+    expect(parseFeedMessage(json(msg))).toEqual(msg);
+  });
 
   const withEvent = (body: unknown) =>
     json({ ...update(), events: [{ seq: 1, ts: 1, body }] });

@@ -11,7 +11,7 @@
 
 use protocol::{
     CancelRejectReason, CancelRequest, Command, Event, OrderId, OrderType, Price, Qty,
-    RejectReason, Side, TimeInForce,
+    RejectReason, Side, TimeInForce, TradingStatus,
 };
 
 /// An order resting in the reference book.
@@ -31,6 +31,7 @@ struct Resting {
 pub struct ReferenceMatcher {
     orders: Vec<Resting>,
     arrivals: u64,
+    status: TradingStatus,
 }
 
 impl ReferenceMatcher {
@@ -49,6 +50,14 @@ impl ReferenceMatcher {
                 qty,
             } => self.place(order_id, side, order_type, qty),
             Command::Cancel { order_id } => self.cancel(order_id),
+            Command::SetTradingStatus { status } => {
+                if status == self.status {
+                    vec![]
+                } else {
+                    self.status = status;
+                    vec![Event::TradingStatusChanged { status }]
+                }
+            }
             Command::Replace {
                 order_id,
                 price,
@@ -58,6 +67,9 @@ impl ReferenceMatcher {
     }
 
     fn place(&mut self, id: OrderId, side: Side, order_type: OrderType, qty: Qty) -> Vec<Event> {
+        if self.status == TradingStatus::Halted {
+            return vec![reject(id, RejectReason::TradingHalted)];
+        }
         let (limit, time_in_force) = match order_type {
             OrderType::Limit {
                 price,
@@ -113,6 +125,13 @@ impl ReferenceMatcher {
     }
 
     fn replace(&mut self, id: OrderId, price: Price, qty: Qty) -> Vec<Event> {
+        if self.status == TradingStatus::Halted {
+            return vec![refuse(
+                id,
+                CancelRequest::Replace,
+                CancelRejectReason::TradingHalted,
+            )];
+        }
         let Some(index) = self.orders.iter().position(|o| o.id == id) else {
             return vec![refuse(
                 id,

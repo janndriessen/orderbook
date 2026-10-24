@@ -7,6 +7,7 @@ import type { Level } from "../protocol/Level";
 import type { MarketInfo } from "../protocol/MarketInfo";
 import type { OrderType } from "../protocol/OrderType";
 import type { RejectReason } from "../protocol/RejectReason";
+import type { TradingStatus } from "../protocol/TradingStatus";
 
 export const market: MarketInfo = {
   symbol: "BTC-USD",
@@ -72,6 +73,9 @@ export const replaced = (seq: number) =>
 export const canceled = (seq: number) =>
   envelope(seq, { type: "canceled", order_id: seq, leaves_qty: 75 });
 
+export const statusChanged = (seq: number, status: TradingStatus) =>
+  envelope(seq, { type: "trading_status_changed", status });
+
 export const l2 = (seq: number) =>
   envelope(seq, { type: "l2_update", side: "buy", price: 1_000_000, qty: 1 });
 
@@ -80,6 +84,7 @@ type Parts = {
   bids?: Level[];
   asks?: Level[];
   events?: Envelope<Event>[];
+  trading_status?: TradingStatus;
 };
 
 /** Bids 100,000.0 down and asks 100,000.5 up, in 0.5 steps (1 tick = 0.1). */
@@ -100,6 +105,7 @@ export function snapshot(
       level(1_000_100, 2_500),
       level(1_000_150, 500),
     ],
+    trading_status: parts.trading_status ?? "open",
     events: parts.events ?? [],
   };
 }

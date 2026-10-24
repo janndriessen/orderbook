@@ -8,7 +8,7 @@
 //! state; besides its random number generator it only counts the ids it has
 //! placed.
 
-use protocol::{Command, OrderId, OrderType, Price, Qty, Side, TimeInForce};
+use protocol::{Command, OrderId, OrderType, Price, Qty, Side, TimeInForce, TradingStatus};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -24,6 +24,16 @@ const MAX_OFFSET: Price = 10;
 /// placed ids. Most of those orders have already traded or been canceled, so
 /// these commands mostly provoke cancel rejects; the rest hit resting orders.
 const RECENT_IDS: u64 = 40;
+/// Chance per command of a `SetTradingStatus` while the flow believes trading
+/// is open: rare, so most of the flow still trades.
+const HALT_CHANCE: f64 = 0.005;
+/// Chance per command of a `SetTradingStatus` while the flow believes trading
+/// is halted: high enough that a halt lasts only a couple of commands, so
+/// about 1% of the flow is halted and the rest is ordinary trading.
+const REOPEN_CHANCE: f64 = 0.5;
+/// Chance that a `SetTradingStatus` repeats the status already in force,
+/// which the matcher must answer with no event.
+const REPEAT_CHANCE: f64 = 0.1;
 /// How far above the last placed id a never-placed id can be.
 const UNKNOWN_ID_REACH: u64 = 1_000;
 
@@ -38,11 +48,14 @@ const _: () = assert!(MID - MAX_OFFSET > 0 && MID + MAX_OFFSET < 1 << 53);
 /// commands. Place ids start at 1 and increase by one, quantities are in
 /// `1..=MAX_QTY` and prices lie within `MAX_OFFSET` of `MID`. A cancel or
 /// replace names either a recently placed id or one above every id placed so
-/// far.
+/// far. Now and then a `SetTradingStatus` halts or reopens trading, so the
+/// other commands also meet a halted market.
 #[derive(Debug)]
 pub struct FuzzFlow {
     rng: ChaCha8Rng,
     next_order_id: OrderId,
+    /// The status the last `SetTradingStatus` asked for.
+    status: TradingStatus,
 }
 
 impl FuzzFlow {
@@ -51,6 +64,7 @@ impl FuzzFlow {
         Self {
             rng: ChaCha8Rng::seed_from_u64(seed),
             next_order_id: 1,
+            status: TradingStatus::Open,
         }
     }
 
@@ -119,6 +133,21 @@ impl Iterator for FuzzFlow {
     type Item = Command;
 
     fn next(&mut self) -> Option<Command> {
+        let toggle_chance = match self.status {
+            TradingStatus::Open => HALT_CHANCE,
+            TradingStatus::Halted => REOPEN_CHANCE,
+        };
+        if self.rng.random_bool(toggle_chance) {
+            if !self.rng.random_bool(REPEAT_CHANCE) {
+                self.status = match self.status {
+                    TradingStatus::Open => TradingStatus::Halted,
+                    TradingStatus::Halted => TradingStatus::Open,
+                };
+            }
+            return Some(Command::SetTradingStatus {
+                status: self.status,
+            });
+        }
         // Weights out of 100. Resting orders dominate so there is something to
         // cross, cancel and replace; every kind stays common enough to occur
         // many times in a few thousand commands.
@@ -190,6 +219,7 @@ mod tests {
             Command::Cancel { order_id } if order_id > last_placed => "cancel_unknown",
             Command::Replace { order_id, .. } if placed(order_id) => "replace_placed",
             Command::Replace { order_id, .. } if order_id > last_placed => "replace_unknown",
+            Command::SetTradingStatus { .. } => "set_trading_status",
             _ => panic!("{command:?} names neither a placed id nor an unknown one"),
         }
     }
@@ -217,6 +247,15 @@ mod tests {
                 reason: CancelRejectReason::PostOnlyWouldCross,
                 ..
             } => "cancel_rejected_post_only",
+            Event::Rejected {
+                reason: RejectReason::TradingHalted,
+                ..
+            } => "rejected_trading_halted",
+            Event::CancelRejected {
+                reason: CancelRejectReason::TradingHalted,
+                ..
+            } => "cancel_rejected_trading_halted",
+            Event::TradingStatusChanged { .. } => "trading_status_changed",
         }
     }
 
@@ -254,7 +293,7 @@ mod tests {
                         assert_in_bounds(price, qty);
                     }
                     Command::Replace { price, qty, .. } => assert_in_bounds(price, qty),
-                    Command::Cancel { .. } => {}
+                    Command::Cancel { .. } | Command::SetTradingStatus { .. } => {}
                 }
                 outcomes.extend(matcher.apply(command).iter().map(outcome));
             }
@@ -268,6 +307,7 @@ mod tests {
             "cancel_unknown",
             "replace_placed",
             "replace_unknown",
+            "set_trading_status",
         ] {
             assert!(kinds.contains(kind), "no {kind} command");
         }
@@ -281,6 +321,9 @@ mod tests {
             "rejected_no_liquidity",
             "cancel_rejected_unknown",
             "cancel_rejected_post_only",
+            "rejected_trading_halted",
+            "cancel_rejected_trading_halted",
+            "trading_status_changed",
         ] {
             assert!(outcomes.contains(outcome), "no {outcome} event");
         }

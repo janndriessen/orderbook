@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Envelope, Event, Price, Qty, Seq};
+use crate::{Envelope, Event, Price, Qty, Seq, TradingStatus};
 
 /// Static description of the market, needed to display ticks and lots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +63,9 @@ pub enum FeedMessage {
         bids: Vec<Level>,
         /// Ask levels, best (lowest) first.
         asks: Vec<Level>,
+        /// Whether the market accepts new orders. New clients learn the status
+        /// from here; later changes arrive as `TradingStatusChanged` events.
+        trading_status: TradingStatus,
         /// Most recent flow events, oldest first, to seed the flow log.
         events: Vec<Envelope<Event>>,
     },
@@ -99,6 +102,36 @@ mod tests {
             serde_json::to_string(&msg).unwrap(),
             r#"{"type":"heartbeat","seq":42}"#
         );
+        assert_eq!(
+            serde_json::from_value::<FeedMessage>(expected).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn snapshot_carries_the_trading_status() {
+        let msg = FeedMessage::Snapshot {
+            seq: 1,
+            market: MarketInfo {
+                symbol: "BTC-USD".into(),
+                price_decimals: 1,
+                qty_decimals: 5,
+            },
+            bids: vec![],
+            asks: vec![],
+            trading_status: TradingStatus::Halted,
+            events: vec![],
+        };
+        let expected = json!({
+            "type": "snapshot",
+            "seq": 1,
+            "market": { "symbol": "BTC-USD", "price_decimals": 1, "qty_decimals": 5 },
+            "bids": [],
+            "asks": [],
+            "trading_status": "halted",
+            "events": [],
+        });
+        assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
         assert_eq!(
             serde_json::from_value::<FeedMessage>(expected).unwrap(),
             msg

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{OrderId, OrderType, Price, Qty, Side};
+use crate::{OrderId, OrderType, Price, Qty, Side, TradingStatus};
 
 /// Something that happened in the engine as the result of a command.
 ///
@@ -114,6 +114,15 @@ pub enum Event {
         /// New total quantity at the level; zero means the level is gone.
         qty: Qty,
     },
+    /// The trading status changed.
+    ///
+    /// Reported only when the status actually changed, as the sole event of
+    /// its command. New feed clients learn the current status from the
+    /// snapshot instead.
+    TradingStatusChanged {
+        /// The status now in force.
+        status: TradingStatus,
+    },
 }
 
 /// The kind of request a `CancelRejected` answers.
@@ -136,6 +145,8 @@ pub enum CancelRejectReason {
     UnknownOrder,
     /// A replace would move a post-only order to a price that trades on arrival.
     PostOnlyWouldCross,
+    /// Trading is halted: a replace is refused while only cancels are accepted.
+    TradingHalted,
 }
 
 /// Why an order was rejected.
@@ -147,6 +158,8 @@ pub enum RejectReason {
     PostOnlyWouldCross,
     /// A market order found the opposite side of the book empty.
     NoLiquidity,
+    /// Trading is halted: only cancels are accepted.
+    TradingHalted,
 }
 
 #[cfg(test)]
@@ -201,6 +214,7 @@ mod tests {
         for (reason, wire) in [
             (RejectReason::PostOnlyWouldCross, "post_only_would_cross"),
             (RejectReason::NoLiquidity, "no_liquidity"),
+            (RejectReason::TradingHalted, "trading_halted"),
         ] {
             let event = Event::Rejected {
                 order_id: 7,
@@ -227,6 +241,12 @@ mod tests {
                 CancelRejectReason::PostOnlyWouldCross,
                 "post_only_would_cross",
             ),
+            (
+                CancelRequest::Replace,
+                "replace",
+                CancelRejectReason::TradingHalted,
+                "trading_halted",
+            ),
         ] {
             let event = Event::CancelRejected {
                 order_id: 7,
@@ -242,6 +262,16 @@ mod tests {
             assert_eq!(serde_json::to_value(&event).unwrap(), expected);
             assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
         }
+    }
+
+    #[test]
+    fn trading_status_changed_has_a_fixed_wire_form() {
+        let event = Event::TradingStatusChanged {
+            status: TradingStatus::Halted,
+        };
+        let expected = json!({ "type": "trading_status_changed", "status": "halted" });
+        assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Event>(expected).unwrap(), event);
     }
 
     #[test]

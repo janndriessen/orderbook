@@ -3,6 +3,7 @@ import type { Envelope } from "./Envelope";
 import type { Event } from "./Event";
 import type { Level } from "./Level";
 import type { MarketInfo } from "./MarketInfo";
+import type { TradingStatus } from "./TradingStatus";
 
 /**
  * Message from the server to a feed client.
@@ -25,6 +26,11 @@ export type FeedMessage = {
    * Ask levels, best (lowest) first.
    */
   asks: Array<Level>;
+  /**
+   * Whether the market accepts new orders. New clients learn the status
+   * from here; later changes arrive as `TradingStatusChanged` events.
+   */
+  trading_status: TradingStatus;
   /**
    * Most recent flow events, oldest first, to seed the flow log.
    */

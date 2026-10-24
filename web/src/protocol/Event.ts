@@ -4,6 +4,7 @@ import type { CancelRequest } from "./CancelRequest";
 import type { OrderType } from "./OrderType";
 import type { RejectReason } from "./RejectReason";
 import type { Side } from "./Side";
+import type { TradingStatus } from "./TradingStatus";
 
 /**
  * Something that happened in the engine as the result of a command.
@@ -128,4 +129,10 @@ export type Event = {
    * New total quantity at the level; zero means the level is gone.
    */
   qty: number;
+} | {
+  "type": "trading_status_changed";
+  /**
+   * The status now in force.
+   */
+  status: TradingStatus;
 };

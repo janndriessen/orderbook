@@ -6,6 +6,7 @@ import type { RejectReason } from "../protocol/RejectReason";
 export const REJECT_REASON_LABELS = {
   post_only_would_cross: "post-only would cross",
   no_liquidity: "no liquidity",
+  trading_halted: "trading halted",
 } satisfies Record<RejectReason, string>;
 
 export const isRejectReason = (value: unknown): value is RejectReason =>
@@ -15,6 +16,7 @@ export const isRejectReason = (value: unknown): value is RejectReason =>
 export const CANCEL_REJECT_REASON_LABELS = {
   unknown_order: "unknown order",
   post_only_would_cross: "post-only would cross",
+  trading_halted: "trading halted",
 } satisfies Record<CancelRejectReason, string>;
 
 export const isCancelRejectReason = (

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use axum::extract::ws::Utf8Bytes;
-use protocol::{Envelope, Event, FeedMessage, MarketInfo, Seq, Ts};
+use protocol::{Envelope, Event, FeedMessage, MarketInfo, Seq, TradingStatus, Ts};
 use tokio::sync::broadcast;
 
 use super::TICK;
@@ -72,6 +72,10 @@ pub struct Publisher {
     /// contains something the next update would deliver again.
     pending: Vec<Envelope<Event>>,
     recent: VecDeque<Envelope<Event>>,
+    /// The status after the last published `TradingStatusChanged`, learned from
+    /// the events alone: the publisher never reads the matcher. Moves with
+    /// `book` and `recent`, so a snapshot agrees with the updates around it.
+    trading_status: TradingStatus,
     seq: Seq,
     /// The encoded snapshot at the current `seq`, built by the first client
     /// that joins there and dropped when the next update moves `seq`.
@@ -91,6 +95,7 @@ impl Publisher {
             book: AggregatedBook::default(),
             pending: Vec::new(),
             recent: VecDeque::with_capacity(RECENT_EVENTS),
+            trading_status: TradingStatus::default(),
             seq: 0,
             snapshot: None,
             idle_ticks: 0,
@@ -161,6 +166,10 @@ impl Publisher {
             newest_ts = newest_ts.max(Some(envelope.ts));
             match envelope.body {
                 Event::L2Update { side, price, qty } => self.book.set(side, price, qty),
+                Event::TradingStatusChanged { status } => {
+                    self.trading_status = status;
+                    events.push(envelope);
+                }
                 _ => events.push(envelope),
             }
         }
@@ -203,6 +212,7 @@ impl Publisher {
                     market: self.market.clone(),
                     bids,
                     asks,
+                    trading_status: self.trading_status,
                     events: self.recent.iter().cloned().collect(),
                 })
             })
@@ -559,6 +569,7 @@ mod tests {
             market,
             bids,
             asks,
+            trading_status,
             events,
         } = decode(&publisher.subscribe().snapshot)
         else {
@@ -568,7 +579,42 @@ mod tests {
         assert_eq!(market.symbol, "BTC-USD");
         assert_eq!(bids, vec![lvl(100, 1), lvl(99, 1), lvl(98, 1)]);
         assert_eq!(asks, vec![lvl(101, 1), lvl(102, 1)]);
+        assert_eq!(trading_status, TradingStatus::Open);
         assert_eq!(events, vec![accepted(6, 1)]);
+    }
+
+    fn status_changed(seq: Seq, status: TradingStatus) -> Envelope<Event> {
+        env(seq, Event::TradingStatusChanged { status })
+    }
+
+    fn snapshot_status(publisher: &mut Publisher) -> TradingStatus {
+        let FeedMessage::Snapshot { trading_status, .. } = decode(&publisher.subscribe().snapshot)
+        else {
+            panic!("expected a snapshot");
+        };
+        trading_status
+    }
+
+    #[test]
+    fn snapshot_carries_the_trading_status_and_the_change_goes_out_as_an_event() {
+        let mut publisher = Publisher::new(market());
+        let mut rx = publisher.subscribe().updates;
+        publisher.ingest(vec![status_changed(1, TradingStatus::Halted)]);
+        assert_eq!(
+            snapshot_status(&mut publisher),
+            TradingStatus::Open,
+            "an unpublished change is not in a snapshot yet"
+        );
+        assert_eq!(publisher.tick(), Some(1));
+        let FeedMessage::Update { events, .. } = next_update(&mut rx) else {
+            panic!("expected an update");
+        };
+        assert_eq!(events, vec![status_changed(1, TradingStatus::Halted)]);
+        assert_eq!(snapshot_status(&mut publisher), TradingStatus::Halted);
+
+        publisher.ingest(vec![status_changed(2, TradingStatus::Open)]);
+        publisher.tick();
+        assert_eq!(snapshot_status(&mut publisher), TradingStatus::Open);
     }
 
     #[test]

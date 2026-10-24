@@ -21,6 +21,7 @@ const LABELS = {
   trade: "Trade",
   replaced: "Replaced",
   canceled: "Canceled",
+  trading_status_changed: "Status",
 } as const;
 
 type Tag = { label: string; title: string };
@@ -97,6 +98,8 @@ function Detail({ entry, market }: Props) {
           <span className={styles.ref}>#{body.order_id}</span>
         </>
       );
+    case "trading_status_changed":
+      return body.status === "halted" ? "Trading halted" : "Trading open";
     case "canceled":
       return (
         <>

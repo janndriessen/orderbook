@@ -15,7 +15,7 @@ mod command;
 mod event;
 mod feed;
 
-pub use command::{Command, OrderType, TimeInForce};
+pub use command::{Command, OrderType, TimeInForce, TradingStatus};
 pub use event::{CancelRejectReason, CancelRequest, Event, RejectReason};
 pub use feed::{FeedMessage, Level, MarketInfo};
 

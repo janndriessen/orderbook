@@ -3,4 +3,7 @@
 /**
  * Why a cancel or replace request was refused.
  */
-export type CancelRejectReason = "unknown_order" | "post_only_would_cross";
+export type CancelRejectReason =
+  | "unknown_order"
+  | "post_only_would_cross"
+  | "trading_halted";

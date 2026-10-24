@@ -3,7 +3,7 @@
 
 use protocol::{
     CancelRejectReason, CancelRequest, Command, Event, OrderId, OrderType, Price, Qty,
-    RejectReason, Side, TimeInForce,
+    RejectReason, Side, TimeInForce, TradingStatus,
 };
 
 use crate::{OrderBook, RestingOrder};
@@ -13,6 +13,7 @@ use crate::{OrderBook, RestingOrder};
 #[derive(Debug, Default)]
 pub struct Matcher {
     book: OrderBook,
+    status: TradingStatus,
 }
 
 impl Matcher {
@@ -32,8 +33,39 @@ impl Matcher {
     /// name, and `Place` goes to `place_limit` or `place_market` by order
     /// type. The events and the panics on values the gateway rules out are
     /// those of that method.
+    ///
+    /// `SetTradingStatus` yields `TradingStatusChanged`, or nothing if the
+    /// status already is the one asked for. While the status is `Halted`, only
+    /// `Cancel` runs as usual: a `Place` yields a lone `Rejected` and a
+    /// `Replace` a lone `CancelRejected`, both `TradingHalted`, whatever their
+    /// order type, price or whether the order rests.
     pub fn apply(&mut self, command: Command) -> Vec<Event> {
+        if self.status == TradingStatus::Halted {
+            match command {
+                Command::Place { order_id, .. } => {
+                    return vec![Event::Rejected {
+                        order_id,
+                        reason: RejectReason::TradingHalted,
+                    }];
+                }
+                Command::Replace { order_id, .. } => {
+                    return vec![Event::CancelRejected {
+                        order_id,
+                        response_to: CancelRequest::Replace,
+                        reason: CancelRejectReason::TradingHalted,
+                    }];
+                }
+                Command::Cancel { .. } | Command::SetTradingStatus { .. } => {}
+            }
+        }
         match command {
+            Command::SetTradingStatus { status } => {
+                if status == self.status {
+                    return Vec::new();
+                }
+                self.status = status;
+                vec![Event::TradingStatusChanged { status }]
+            }
             Command::Place {
                 order_id,
                 side,
@@ -1128,6 +1160,108 @@ mod tests {
         assert_eq!(
             m.replace(2, 100, 5),
             [replaced(2, 100, 5), l2(Side::Buy, 100, 5)]
+        );
+    }
+
+    fn set_status(m: &mut Matcher, status: TradingStatus) -> Vec<Event> {
+        m.apply(Command::SetTradingStatus { status })
+    }
+
+    fn halted_place(order_id: OrderId, order_type: OrderType) -> Command {
+        Command::Place {
+            order_id,
+            side: Side::Buy,
+            order_type,
+            qty: 1,
+        }
+    }
+
+    #[test]
+    fn a_status_change_is_reported_once() {
+        let mut m = Matcher::new();
+        assert!(set_status(&mut m, TradingStatus::Open).is_empty());
+        let changed = |status| [Event::TradingStatusChanged { status }];
+        assert_eq!(
+            set_status(&mut m, TradingStatus::Halted),
+            changed(TradingStatus::Halted)
+        );
+        assert!(set_status(&mut m, TradingStatus::Halted).is_empty());
+        assert_eq!(
+            set_status(&mut m, TradingStatus::Open),
+            changed(TradingStatus::Open)
+        );
+    }
+
+    #[test]
+    fn halted_refuses_places_of_every_kind_and_leaves_the_book_alone() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        set_status(&mut m, TradingStatus::Halted);
+        let limit = |time_in_force| OrderType::Limit {
+            price: 100,
+            time_in_force,
+        };
+        for (id, order_type) in [
+            (2, limit(Gtc)),
+            (3, limit(Ioc)),
+            (4, limit(PostOnly)),
+            (5, OrderType::Market {}),
+        ] {
+            assert_eq!(
+                m.apply(halted_place(id, order_type)),
+                [Event::Rejected {
+                    order_id: id,
+                    reason: RejectReason::TradingHalted,
+                }]
+            );
+        }
+        assert_eq!(m.book().len(), 1);
+        assert_eq!(m.book().order(1).map(|order| order.qty), Some(5));
+    }
+
+    #[test]
+    fn halted_refuses_a_replace_but_allows_a_cancel() {
+        let mut m = Matcher::new();
+        m.place_limit(1, Side::Sell, 100, Gtc, 5);
+        m.place_limit(2, Side::Sell, 101, Gtc, 5);
+        set_status(&mut m, TradingStatus::Halted);
+        assert_eq!(
+            m.apply(Command::Replace {
+                order_id: 1,
+                price: 102,
+                qty: 5,
+            }),
+            [Event::CancelRejected {
+                order_id: 1,
+                response_to: CancelRequest::Replace,
+                reason: CancelRejectReason::TradingHalted,
+            }]
+        );
+        assert_eq!(m.book().order(1).map(|order| order.price), Some(100));
+        assert_eq!(
+            m.apply(Command::Cancel { order_id: 1 }),
+            [canceled(1, 5), l2(Side::Sell, 100, 0)]
+        );
+        assert_eq!(
+            m.apply(Command::Cancel { order_id: 9 }),
+            [unknown_cancel(9)]
+        );
+    }
+
+    #[test]
+    fn reopening_accepts_places_again() {
+        let mut m = Matcher::new();
+        set_status(&mut m, TradingStatus::Halted);
+        set_status(&mut m, TradingStatus::Open);
+        assert_eq!(
+            m.apply(halted_place(
+                1,
+                OrderType::Limit {
+                    price: 100,
+                    time_in_force: Gtc,
+                }
+            )),
+            [accepted(1, Side::Buy, 100, 1), l2(Side::Buy, 100, 1)]
         );
     }
 }

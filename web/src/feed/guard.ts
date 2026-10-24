@@ -31,6 +31,9 @@ function all(value: unknown, check: (item: Dict) => boolean): boolean {
 
 const isSide = (value: unknown) => value === "buy" || value === "sell";
 
+const isTradingStatus = (value: unknown) =>
+  value === "open" || value === "halted";
+
 /** Per event type: its side field, its signed integer fields, its unsigned ones. */
 const EVENTS: Record<string, [string | null, string[], string[]]> = {
   accepted: ["side", [], ["order_id", "qty"]],
@@ -44,6 +47,7 @@ const EVENTS: Record<string, [string | null, string[], string[]]> = {
   replaced: [null, ["price"], ["order_id", "qty"]],
   canceled: [null, [], ["order_id", "leaves_qty"]],
   l2_update: ["side", ["price"], ["qty"]],
+  trading_status_changed: [null, [], []],
 };
 
 function isOrderType(value: unknown): boolean {
@@ -76,6 +80,7 @@ function isEvent(item: Dict): boolean {
     (body.type !== "cancel_rejected" ||
       (isCancelRequest(body.response_to) &&
         isCancelRejectReason(body.reason))) &&
+    (body.type !== "trading_status_changed" || isTradingStatus(body.status)) &&
     ints(body, signed) &&
     ints(body, unsigned, 0)
   );
@@ -119,7 +124,11 @@ export function parseFeedMessage(raw: unknown): FeedMessage | null {
     return null;
   }
   if (value.type === "update") return value as FeedMessage;
-  if (value.type === "snapshot" && isMarket(value.market)) {
+  if (
+    value.type === "snapshot" &&
+    isMarket(value.market) &&
+    isTradingStatus(value.trading_status)
+  ) {
     return value as FeedMessage;
   }
   return null;

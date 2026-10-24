@@ -79,17 +79,20 @@ impl Gateway {
     /// Checks `command` and, if it passes, returns it with the next sequence
     /// number and `ts`, its venue time.
     ///
-    /// Every command's order id must be within [`MAX_ORDER_ID`]. Every `Place`
-    /// uses up its order id, even one refused by a later check, because a
-    /// client order id is unique once sent (within [`ORDER_ID_WINDOW`]). A
+    /// Every command that names an order must use an id within
+    /// [`MAX_ORDER_ID`]. Every `Place` uses up its order id, even one refused
+    /// by a later check, because a client order id is unique once sent (within
+    /// [`ORDER_ID_WINDOW`]). A
     /// `Replace` and a `Cancel` name an existing order, so the gateway does not
     /// check whether their ids were used; whether the order rests is for the
-    /// engine to decide.
+    /// engine to decide. A `SetTradingStatus` names no order and has no values
+    /// to check; it is only sequenced.
     pub fn submit(&mut self, ts: Ts, command: Command) -> Result<Envelope<Command>, GatewayReject> {
-        let (Command::Place { order_id, .. }
+        if let Command::Place { order_id, .. }
         | Command::Replace { order_id, .. }
-        | Command::Cancel { order_id }) = command;
-        if order_id > MAX_ORDER_ID {
+        | Command::Cancel { order_id } = command
+            && order_id > MAX_ORDER_ID
+        {
             return Err(GatewayReject::InvalidOrderId(order_id));
         }
         match command {
@@ -118,7 +121,7 @@ impl Gateway {
                 check_qty(qty)?;
                 check_price(price)?;
             }
-            Command::Cancel { .. } => {}
+            Command::Cancel { .. } | Command::SetTradingStatus { .. } => {}
         }
         self.last_seq += 1;
         Ok(Envelope {
@@ -147,7 +150,7 @@ fn check_price(price: Price) -> Result<(), GatewayReject> {
 
 #[cfg(test)]
 mod tests {
-    use protocol::{Side, TimeInForce};
+    use protocol::{Side, TimeInForce, TradingStatus};
 
     use super::*;
 
@@ -183,6 +186,20 @@ mod tests {
     /// Submits `command` to a fresh gateway.
     fn submit(command: Command) -> Result<Envelope<Command>, GatewayReject> {
         Gateway::new().submit(0, command)
+    }
+
+    #[test]
+    fn set_trading_status_is_sequenced_without_further_checks() {
+        let mut gateway = Gateway::new();
+        let set = |status| Command::SetTradingStatus { status };
+        let first = gateway.submit(5, set(TradingStatus::Halted)).unwrap();
+        assert_eq!((first.seq, first.ts), (1, 5));
+        let next = gateway.submit(6, place(1, 100, 1)).unwrap();
+        assert_eq!(next.seq, 2);
+        assert_eq!(
+            gateway.submit(7, set(TradingStatus::Halted)).unwrap().seq,
+            3
+        );
     }
 
     #[test]

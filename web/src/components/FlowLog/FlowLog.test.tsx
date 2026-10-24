@@ -9,6 +9,7 @@ import {
   market,
   rejected,
   replaced,
+  statusChanged,
   trade,
 } from "../../test/fixtures";
 import { FlowLog } from "./FlowLog";
@@ -60,6 +61,16 @@ describe("FlowLog", () => {
     expect(items()[0]).toHaveTextContent(`Accepted${text}`);
   });
 
+  it.each([
+    ["halted", "Trading halted"],
+    ["open", "Trading open"],
+  ] as const)("words a status change to %s as %s", (status, text) => {
+    render(
+      <FlowLog entries={logOf(statusChanged(1, status))} market={market} />,
+    );
+    expect(items()[0]).toHaveTextContent(`Status${text}`);
+  });
+
   it("explains the tags in a tooltip", () => {
     const orderType = { type: "market" } as const;
     render(<FlowLog entries={logOf(accepted(1, orderType))} market={market} />);
@@ -69,6 +80,7 @@ describe("FlowLog", () => {
   it.each([
     ["post_only_would_cross", "post-only would cross"],
     ["no_liquidity", "no liquidity"],
+    ["trading_halted", "trading halted"],
   ] as const)("shows a rejected order's reason %s in words", (reason, text) => {
     render(<FlowLog entries={logOf(rejected(1, reason))} market={market} />);
     expect(items()[0]).toHaveTextContent(`Rejected${text}#1`);
