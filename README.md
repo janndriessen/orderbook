@@ -55,7 +55,7 @@ Stack: Rust (Cargo workspace, Tokio, Axum) and React with TypeScript. Browsers r
   - [x] `generator` crate: seeded fuzz order flow (all time-in-force values, market orders, cancels and replaces of live, stale and unknown ids, and now and then a halt or reopening of trading) that stays inside the gateway's bounds, checked against the matcher in its tests
   - [x] `harness` crate: structural invariants (book structure, event consistency, the feed's levels matching the book) checked after every command of 50 seeded fuzz runs of 2,000 commands, plus a determinism check. They catch an inconsistent book or feed, not a consistent but wrong one; the reference model below checks the outcomes
   - [x] Reference model: a naive second matcher in the `harness` crate, whose events its fuzz test compares with the real matcher's exactly. It shares no code with the matcher, but it could share a misreading of the docs
-  - [x] Benchmark: `cargo run -p harness --release --bin bench` measures throughput and cancel cost (results under the price-levels trade-off)
+  - [x] Benchmark: `cargo run -p harness --release --bin bench` measures throughput and cancel cost (results under [Performance](#performance))
   - [x] Level totals: left unbounded on purpose, since real BTC flow stays far below 2^53 (see the trade-offs)
 - [ ] Hyperliquid adapter and replayer
   - [x] `hyperliquid-adapter` crate: decimal strings from Hyperliquid parsed into integer ticks and lots, exactly and without floats, bounded at the protocol's 2^53 - 1
@@ -154,6 +154,65 @@ scripts/           small dependency-free tools (Node): `feed-latency.mjs` measur
 
 Planned, not yet present: `data/` (recorded sessions, gitignored).
 
+## Performance
+
+Figures were measured on an Apple M3 Max with release builds. Each says when and how to reproduce it, or that it was a one-off measurement.
+
+**Matcher, synthetic flow** (2026-10-24; `cargo run --release -p harness --bin bench`): about 10.3 million fuzz commands per second, 96.6 to 97.3 ns per command over three runs. The previous build, run alternately with it, measured 108.5 to 118.0 ns before the order index switched to a faster hasher.
+
+Cancel cost by position in the queue, from the same bench (one run under heavy system load, so read these as upper bounds):
+
+| Orders at the price | Front of the level | Middle of the level |
+| ------------------- | ------------------ | ------------------- |
+| 1,000               | about 20 ns        | 214 ns              |
+| 10,000              | about 20 ns        | 1.9 µs              |
+| 100,000             | about 20 ns        | 20 µs               |
+
+Real BTC-USD levels are much shorter: at most about 124 orders, median 6 (see the replayed measurement under the price-levels trade-off in [Trade-offs](#trade-offs-vs-production-exchanges)).
+
+**Live pipeline, where an update's time goes** (one-off timing on the 10 s fixture and a 60 s live run, 2026-10-24):
+
+| Step                                            | Time                                          |
+| ----------------------------------------------- | --------------------------------------------- |
+| The source's own delay until a push reaches us  | p50 about 320 ms, p90 376 ms (includes clock offset) |
+| Waiting for the slowest of the seven connections | p50 20 ms, p90 115 ms                        |
+| Our compute per push                            | about 0.2 ms                                  |
+| Publish tick                                    | 0 to 50 ms, 25 ms on average (the tick is 50 ms) |
+
+Of the 0.2 ms, `L2Flow` (decode, merge, translate) takes about 86 µs, the engine about 100 µs, the queues 25 to 60 µs and the publisher's encoding about 10 µs. Nearly all of the lag a client sees is the source's.
+
+**Publish tick, 50 ms against 100 ms** (2026-10-24; two builds side by side on the live source for 3 minutes, one client each, measured with [`scripts/feed-latency.mjs`](scripts/feed-latency.mjs)):
+
+The tick is the constant `TICK` in `crates/engine/src/publisher/mod.rs`, so each build is a checkout with its own value, started on its own port (one with `from_millis(100)`, one with `from_millis(50)`):
+
+```bash
+ORDERBOOK_ADDR=127.0.0.1:8081 cargo run --release -p replayer --bin live   # in the 100 ms checkout
+ORDERBOOK_ADDR=127.0.0.1:8082 cargo run --release -p replayer --bin live   # in the 50 ms checkout
+node scripts/feed-latency.mjs 180 t100=ws://127.0.0.1:8081/ws t50=ws://127.0.0.1:8082/ws
+```
+
+| Tick   | Lag p10 / p50 / p90 | Updates sent | Per client | Server CPU over 180 s     |
+| ------ | ------------------- | ------------ | ---------- | ------------------------- |
+| 100 ms | 365 / 426 / 572 ms  | 1.78 per s   | 7.0 KB/s   | 1.07 s (0.6% of one core) |
+| 50 ms  | 354 / 397 / 537 ms  | 1.78 per s   | 6.7 KB/s   | 1.11 s (0.6% of one core) |
+
+The lag includes the source's own delay and any clock offset, so only the difference between the rows means anything.
+
+**Throughput log** (the `live` binary logs one line every 10 s: updates, events, bytes, largest update, largest lag). A typical live window: 18 updates, about 600 events, about 92 KB. The largest update is the first one, which mirrors the whole book (about 36 KB).
+
+**Browser** (one-off, 2026-10-24): handling one update costs about 50 µs of JavaScript (parse, book apply, grouping, flow log), measured in Node with the real modules. With the flow log open the main thread is about 1.4% busier than with it closed (production build, Chrome).
+
+**Memory:** not measured yet. An hours-long run is planned before deployment (the deployment item in the [Status](#status) roadmap).
+
+**Not worth it at this load:**
+
+- Arena or intrusive-list matcher: about 100 ns per command against about 75 commands per second.
+- Ring-buffer queues: the queues cost 25 to 60 µs of a push that takes about 0.2 ms.
+- Link-time optimisation: no measurable gain.
+- A faster inflate: saves about 10 µs per push.
+- Parsing each source line once: about 3 µs per line, and it would break the record and replay path that shares the parser.
+- Compressing messages to clients: zlib makes real updates about 7 times smaller, but the WebSocket library has no permessage-deflate (already a [trade-off](#trade-offs-vs-production-exchanges)).
+
 ## Trade-offs vs. production exchanges
 
 - **Replication:** a single engine instance. Production runs several identical replicas kept in sync by a consensus protocol such as Raft, for instant failover.
@@ -164,13 +223,13 @@ Planned, not yet present: `data/` (recorded sessions, gitignored).
 - **Sequence gaps:** a command whose sequence number is not the next one stops the engine with a panic, and the service with it. Production engines request missing input from the sequencer's journal on a gap and drop a repeated number as a duplicate, then carry on.
 - **Accounts and risk:** no balances, margin or pre-trade risk checks.
 - **Market data:** JSON over WebSocket, batched (50 ms). Production also offers binary feeds (e.g. SBE, multicast) for professional clients, and per-order (market-by-order) feeds. This feed is level-based only: aggregated quantity per price.
-- **Compression:** feed messages are sent uncompressed. Production feeds commonly offer WebSocket compression (permessage-deflate) or compact binary encodings.
+- **Compression:** feed messages are sent uncompressed. Production feeds commonly offer WebSocket compression (permessage-deflate) or compact binary encodings. Measured gain: see [Performance](#performance).
 - **Heartbeat:** the heartbeat repeats only the latest sequence number. Production feeds' heartbeats also carry a time and the last trade id, so a client can tell a quiet market from a stalled one.
-- **Measurement:** the matcher is benchmarked on its own (see the price-levels trade-off), and the publisher logs message rates, sizes and lag every 10 seconds. There are no latency percentiles, no end-to-end measurement from command to client and no queue-depth metric; production venues measure end-to-end latency percentiles and monitor queue depth and message rates continuously.
+- **Measurement:** the matcher is benchmarked on its own (see [Performance](#performance)), and the publisher logs message rates, sizes and lag every 10 seconds. There is no continuous latency percentile, no end-to-end measurement from command to client inside the service (only the one-off client-side lag in [Performance](#performance)) and no queue-depth metric; production venues measure end-to-end latency percentiles and monitor queue depth and message rates continuously.
 - **Price grouping:** the client receives the full-depth book and groups it itself. Production venues do both: some send the full level book and leave grouping to the client, others serve a few levels per side already grouped at the precision the client asks for, which keeps messages small.
 - **Level totals:** nothing bounds a level's total quantity, and above 2^53 lots the feed's integers are no longer exact. This is a workload assumption, not a property of the market: the service has no balance checks and the source is a derivatives market, so physical supply bounds nothing. Real BTC-USD levels stay many orders of magnitude below 2^53 lots, but synthetic flow could exceed it (about 90 million maximum-size orders at one price). The web client refuses such a message and can't show the book until the level shrinks. A production venue would cap open orders per account or publish sizes as decimal strings or binary integers.
 - **Price levels:** each level is a `VecDeque` FIFO, so canceling inside a level is linear in its length. An index-based linked list gives O(1) cancel.
-  - Synthetic benchmark, measured on an Apple M3 Max (release build, 2026-10-20): the matcher handles about 8.6 million fuzz commands per second (about 117 ns each); a cancel at the front of a level stays near 35 ns, while one in the middle costs about 250 ns with 1,000 orders at the price, 1.9 µs with 10,000 and 21 µs with 100,000.
+  - Synthetic benchmark: see [Performance](#performance).
   - Replayed measurement (`levels` binary on 22 minutes of BTC-USD, 247 snapshots, 17,669 commands; Apple M3 Max, release build, 2026-10-22): the source reports a median of 6 orders per level (p99 41, max 124), and 22 at the best bid and ask (p99 92, max 124). Our replayed book holds at most 11 orders in a level (6 at the best bid and ask), since synthetic orders are placed one per growth of a level. The 5,227 cancels in the replay cost about 100 ns on average (p50 84 ns, p99 about 170 to 210 ns over repeated runs). Timestamps on this machine tick in steps of about 41.67 ns, so single-sample percentiles are quantized and a single-sample maximum (291 ns in one run, 2.8 µs in another) is noise, not a result. For the observed maximum of 124 orders, the bench at lengths 10 and 100 (same machine, 2026-10-22) gives a middle cancel of 250 ns and 83 ns (the length-10 figure is one cancel per batch, so it is quantized and noisy) and a front cancel of about 41 ns at both.
   - Decision: real levels are too short for the linear cancel to matter, since a cancel costs about as much as an ordinary command. Levels stay a `VecDeque`, and an index-based linked list is not warranted. This is one short session; a much busier market could be measured again with the same binary.
 - **Order index hash:** the book's order index hashes ids with a fast multiplicative hasher instead of std's SipHash; unlike SipHash, it does not resist crafted colliding keys. This is safe only because order ids reach the book through our own gateway; if ids could ever come from untrusted clients, this must be revisited. The multiplication spreads sequential ids (the gateway's ids are counters), but ids that are all multiples of a large power of two would use only part of the table, so the hasher suits counter-like ids.
