@@ -2,14 +2,16 @@
 
 use std::any::Any;
 use std::io;
+use std::net::SocketAddr;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use axum::serve::ListenerExt;
 use protocol::MarketInfo;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::source::{self, Step};
 use crate::ws;
@@ -81,7 +83,7 @@ pub async fn run(
 
     info!(%addr, "serving feed at /ws");
     let served = axum::serve(
-        listener,
+        feed_listener(listener),
         ws::router(handle, shutdown.clone(), ping_interval),
     )
     .with_graceful_shutdown(shutdown.clone().cancelled_owned())
@@ -107,6 +109,21 @@ pub async fn run(
         return Err(io::Error::other("a service component failed"));
     }
     Ok(())
+}
+
+/// Wraps `listener` so every accepted connection has Nagle's algorithm off.
+///
+/// A feed frame is small and time-sensitive: with Nagle on, the kernel holds a
+/// write back until the previous one is acknowledged, delaying the update by
+/// up to a round trip. `axum::serve` leaves the option at the OS default.
+fn feed_listener(
+    listener: TcpListener,
+) -> impl axum::serve::Listener<Io = TcpStream, Addr = SocketAddr> {
+    listener.tap_io(|tcp| {
+        if let Err(err) = tcp.set_nodelay(true) {
+            warn!(%err, "cannot disable Nagle's algorithm on a feed connection");
+        }
+    })
 }
 
 /// Waits for each named thread to end, in order, and logs any that panicked,
@@ -151,7 +168,19 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use axum::serve::Listener;
+
     use super::*;
+
+    #[tokio::test]
+    async fn accepted_feed_connections_have_nagle_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let mut listener = feed_listener(listener);
+        let _client = TcpStream::connect(addr).await.expect("connect");
+        let (accepted, _) = listener.accept().await;
+        assert!(accepted.nodelay().expect("read nodelay"));
+    }
 
     #[test]
     fn the_panic_message_is_read_from_either_payload() {
