@@ -19,7 +19,7 @@ use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-pub use self::state::{Frame, Publisher, Subscription, encode};
+pub use self::state::{Frame, Publisher, Subscription};
 
 /// Time between two updates: the batching interval production venues use for
 /// level-2 feeds. A tick sends nothing when nothing changed, so the message

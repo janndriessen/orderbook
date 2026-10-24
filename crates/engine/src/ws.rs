@@ -27,7 +27,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::publisher::{self, Frame, Handle};
+use crate::publisher::{Frame, Handle};
 
 /// Longest a single send to a client may take before the client is dropped.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -66,12 +66,7 @@ async fn serve_client(mut socket: WebSocket, state: AppState) {
         return;
     };
     let mut updates = subscription.updates;
-    if !send(
-        &mut socket,
-        Message::Text(publisher::encode(&subscription.snapshot)),
-    )
-    .await
-    {
+    if !send(&mut socket, Message::Text(subscription.snapshot)).await {
         return;
     }
 

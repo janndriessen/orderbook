@@ -55,8 +55,9 @@ pub const BROADCAST_CAPACITY: usize = 64;
 #[derive(Debug)]
 pub struct Subscription {
     /// Full state as of feed position `seq`; the next message is a heartbeat
-    /// repeating `seq`, or the update `seq + 1`.
-    pub snapshot: FeedMessage,
+    /// repeating `seq`, or the update `seq + 1`. Encoded once per feed
+    /// position and shared by every client that joins at it.
+    pub snapshot: Frame,
     /// Every message sent after the snapshot, and nothing sent before it.
     pub updates: broadcast::Receiver<Frame>,
 }
@@ -72,6 +73,9 @@ pub struct Publisher {
     pending: Vec<Envelope<Event>>,
     recent: VecDeque<Envelope<Event>>,
     seq: Seq,
+    /// The encoded snapshot at the current `seq`, built by the first client
+    /// that joins there and dropped when the next update moves `seq`.
+    snapshot: Option<Frame>,
     /// Consecutive ticks that sent nothing.
     idle_ticks: u32,
     updates: broadcast::Sender<Frame>,
@@ -88,6 +92,7 @@ impl Publisher {
             pending: Vec::new(),
             recent: VecDeque::with_capacity(RECENT_EVENTS),
             seq: 0,
+            snapshot: None,
             idle_ticks: 0,
             updates,
             stats: Stats::default(),
@@ -166,6 +171,7 @@ impl Publisher {
 
         let (bids, asks) = self.book.take_changes();
         self.seq += 1;
+        self.snapshot = None;
         self.remember(&events);
         let event_count = events.len();
         let update = FeedMessage::Update {
@@ -187,16 +193,22 @@ impl Publisher {
     /// Both happen in this one call, between ticks, so the first frame the
     /// subscription yields is either a heartbeat repeating `snapshot.seq` or the
     /// update `snapshot.seq + 1`.
-    pub fn subscribe(&self) -> Subscription {
-        let (bids, asks) = self.book.levels();
+    pub fn subscribe(&mut self) -> Subscription {
+        let snapshot = self
+            .snapshot
+            .get_or_insert_with(|| {
+                let (bids, asks) = self.book.levels();
+                encode(&FeedMessage::Snapshot {
+                    seq: self.seq,
+                    market: self.market.clone(),
+                    bids,
+                    asks,
+                    events: self.recent.iter().cloned().collect(),
+                })
+            })
+            .clone();
         Subscription {
-            snapshot: FeedMessage::Snapshot {
-                seq: self.seq,
-                market: self.market.clone(),
-                bids,
-                asks,
-                events: self.recent.iter().cloned().collect(),
-            },
+            snapshot,
             updates: self.updates.subscribe(),
         }
     }
@@ -217,7 +229,7 @@ fn now_micros() -> Ts {
 }
 
 /// Serializes a message for the wire.
-pub fn encode(message: &FeedMessage) -> Frame {
+fn encode(message: &FeedMessage) -> Frame {
     let json = serde_json::to_string(message)
         .expect("feed messages hold only strings, integers and lists, which always serialize");
     Frame::from(json)
@@ -236,6 +248,10 @@ mod tests {
     use crate::app::market;
     use crate::matcher::SequencedMatcher;
     use crate::source::RandomWalk;
+
+    fn decode(frame: &Frame) -> FeedMessage {
+        serde_json::from_str(frame.as_str()).expect("valid frame")
+    }
 
     fn env(seq: Seq, body: Event) -> Envelope<Event> {
         Envelope { seq, ts: 0, body }
@@ -544,7 +560,7 @@ mod tests {
             bids,
             asks,
             events,
-        } = publisher.subscribe().snapshot
+        } = decode(&publisher.subscribe().snapshot)
         else {
             panic!("expected a snapshot");
         };
@@ -556,6 +572,26 @@ mod tests {
     }
 
     #[test]
+    fn clients_at_the_same_seq_share_one_encoded_snapshot() {
+        let mut publisher = Publisher::new(market());
+        publisher.ingest(vec![l2(1, Side::Buy, 100, 1)]);
+        publisher.tick();
+        let first = publisher.subscribe().snapshot;
+        let second = publisher.subscribe().snapshot;
+        assert_eq!(first.as_str(), second.as_str());
+        assert_eq!(first.as_str().as_ptr(), second.as_str().as_ptr());
+
+        publisher.ingest(vec![l2(2, Side::Buy, 99, 1)]);
+        publisher.tick();
+        let FeedMessage::Snapshot { seq, bids, .. } = decode(&publisher.subscribe().snapshot)
+        else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(seq, 2);
+        assert_eq!(bids, vec![lvl(100, 1), lvl(99, 1)]);
+    }
+
+    #[test]
     fn recent_events_are_capped_oldest_dropped() {
         let mut publisher = Publisher::new(market());
         let total = RECENT_EVENTS as u64 + 10;
@@ -563,7 +599,7 @@ mod tests {
             publisher.ingest(vec![accepted(seq, seq)]);
         }
         publisher.tick();
-        let FeedMessage::Snapshot { events, .. } = publisher.subscribe().snapshot else {
+        let FeedMessage::Snapshot { events, .. } = decode(&publisher.subscribe().snapshot) else {
             panic!("expected a snapshot");
         };
         assert_eq!(events.len(), RECENT_EVENTS);
@@ -662,7 +698,7 @@ mod tests {
             if i % 2 == 0 {
                 let Subscription { snapshot, updates } = publisher.subscribe();
                 let mut client = Client::default();
-                client.apply(snapshot);
+                client.apply(decode(&snapshot));
                 clients.push((client, updates));
             }
             if i % 3 == 0 {
@@ -676,7 +712,7 @@ mod tests {
                     if tick == SECOND / 2 {
                         let Subscription { snapshot, updates } = publisher.subscribe();
                         let mut client = Client::default();
-                        client.apply(snapshot);
+                        client.apply(decode(&snapshot));
                         clients.push((client, updates));
                     }
                     publisher.tick();
