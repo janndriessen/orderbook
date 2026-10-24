@@ -347,6 +347,14 @@ impl L2Flow {
         self.stats.merged_pushes + self.catching_up
     }
 
+    /// The time of the latest push that merged since the connections were
+    /// opened, if one has. A push that leaves the book unchanged merges
+    /// without commands, so this is how a caller sees that the new
+    /// connections deliver.
+    pub fn last_merged(&self) -> Option<Ts> {
+        self.last_merged
+    }
+
     /// Whether a push has merged yet.
     pub fn started(&self) -> bool {
         self.stats.started

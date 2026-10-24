@@ -16,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use hyperliquid_adapter::{BookLevel, BookSnapshot, L2Decoder, Message};
 use hyperliquid_recorder::CONNECTIONS;
 use matching::Matcher;
-use protocol::{Command, FeedMessage, Level, Price, Side};
+use protocol::{Command, Event, FeedMessage, Level, Price, Side, TradingStatus};
 use replayer::live::{Retry, serve};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -297,15 +297,38 @@ fn with_trades(lines: &[Sent], trades: &[Sent]) -> Vec<String> {
         .collect()
 }
 
+/// The trading status in the snapshot a client connecting now receives.
+async fn late_snapshot_status(addr: std::net::SocketAddr) -> TradingStatus {
+    let (mut late, _) = timeout(WAIT, connect_async(format!("ws://{addr}/ws")))
+        .await
+        .expect("the service accepts a late client")
+        .expect("connect");
+    loop {
+        let frame = timeout(WAIT, late.next())
+            .await
+            .expect("the late client gets a snapshot")
+            .expect("the feed stays open")
+            .expect("a frame");
+        let Frame::Text(text) = frame else { continue };
+        if let FeedMessage::Snapshot { trading_status, .. } =
+            serde_json::from_str(text.as_str()).expect("feed message")
+        {
+            return trading_status;
+        }
+    }
+}
+
 /// Serves the rounds one after another: each round accepts one connection
 /// per grouping, sends each its lines, and, unless it is the last round,
-/// closes them all. Sends the number of connections served once the last
+/// closes them all and, if `resume` is given, waits for its signal before
+/// accepting the next round. Sends the number of connections served once the last
 /// round has sent everything and keeps its connections open.
 fn fake_source(
     listener: TcpListener,
     rounds: Vec<Round>,
     served: mpsc::UnboundedSender<usize>,
     mut gate: mpsc::UnboundedReceiver<()>,
+    mut resume: Option<mpsc::UnboundedReceiver<()>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let count = rounds.len();
@@ -350,6 +373,12 @@ fn fake_source(
                     .expect("the test is listening");
                 for mut socket in sockets {
                     let _ = socket.close(None).await;
+                }
+                if let Some(resume) = resume.as_mut() {
+                    timeout(3 * WAIT, resume.recv())
+                        .await
+                        .expect("the client saw the market halted")
+                        .expect("the test is listening");
                 }
             } else {
                 held = sockets;
@@ -424,7 +453,10 @@ fn expected_of(round: &Round) -> (Levels, Levels) {
 /// `expected`, then shuts the service down and checks that it stops. A
 /// source that plays several rounds closes its connections after each but the
 /// last only once the client's book equals `checkpoint`, so that the
-/// connections are lost with the book of the round already in the engine.
+/// connections are lost with the book of the round already in the engine. The
+/// source then accepts the next round only once the client has seen the
+/// market halted and a second client has been given a snapshot saying so, and
+/// the client must see the market reopen before any level changes again.
 /// The lines received are also given to `record`. Returns how many
 /// connections the source accepted and how long the book took to reach
 /// `expected`.
@@ -439,8 +471,12 @@ async fn follow(
     let url = format!("ws://{}", source.local_addr().expect("addr"));
     let (served, mut served_rx) = mpsc::unbounded_channel();
     let (open_gate, gate) = mpsc::unbounded_channel();
-    let fake = fake_source(source, rounds, served, gate);
+    let (resume, outage) = mpsc::unbounded_channel();
+    let outage = checkpoint.is_some().then_some(outage);
+    let fake = fake_source(source, rounds, served, gate, outage);
     let mut checkpoint = checkpoint;
+    let expect_outage = checkpoint.is_some();
+    let (mut halted, mut reopened) = (false, false);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -490,10 +526,25 @@ async fn follow(
                 seq: next,
                 bids: b,
                 asks: a,
-                ..
+                events,
             } => {
                 assert_eq!(Some(next), seq.map(|s| s + 1), "gap in the feed");
                 seq = Some(next);
+                let status = events.iter().find_map(|e| match e.body {
+                    Event::TradingStatusChanged { status } => Some(status),
+                    _ => None,
+                });
+                if status == Some(TradingStatus::Halted) {
+                    halted = true;
+                    assert_eq!(late_snapshot_status(addr).await, TradingStatus::Halted);
+                    resume.send(()).expect("the source is waiting");
+                } else if halted && !reopened {
+                    assert!(
+                        status == Some(TradingStatus::Open) || (b.is_empty() && a.is_empty()),
+                        "levels changed before the market reopened"
+                    );
+                }
+                reopened |= status == Some(TradingStatus::Open);
                 patch(&mut bids, &b);
                 patch(&mut asks, &a);
             }
@@ -511,6 +562,11 @@ async fn follow(
         }
     }
     let took = started.elapsed();
+    assert_eq!(
+        (halted, reopened),
+        (expect_outage, expect_outage),
+        "halted and reopened exactly when the source was lost"
+    );
     let connections = timeout(WAIT, served_rx.recv())
         .await
         .expect("the source finished")
@@ -552,6 +608,109 @@ async fn the_book_ends_right_after_the_source_drops_every_connection_once() {
         2 * CONNECTIONS,
         "every connection was reopened"
     );
+}
+
+/// The trading status a feed update announces, if it does.
+fn announced(events: &[protocol::Envelope<Event>]) -> Option<TradingStatus> {
+    events.iter().find_map(|e| match e.body {
+        Event::TradingStatusChanged { status } => Some(status),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn the_market_reopens_when_the_book_did_not_change_during_the_outage() {
+    let fixture = recording();
+    let first = whole_round(&fixture);
+    let expected = expected_of(&first);
+    // The new connections start with the book the service already holds, so
+    // their first push merges without a single command.
+    let end = first
+        .lines
+        .values()
+        .filter_map(|lines| lines.last())
+        .map(|s| s.ts)
+        .max()
+        .expect("lines");
+    let quiet = Round {
+        lines: fixture
+            .books
+            .iter()
+            .map(|(key, books)| {
+                let last = books.last().expect("a book");
+                (*key, vec![full_book(last, end + 1_000_000)])
+            })
+            .collect(),
+        trades: Vec::new(),
+    };
+    let source = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("ws://{}", source.local_addr().expect("addr"));
+    let (served, _served_rx) = mpsc::unbounded_channel();
+    let (open_gate, gate) = mpsc::unbounded_channel();
+    let (resume, outage) = mpsc::unbounded_channel();
+    let fake = fake_source(source, vec![first, quiet], served, gate, Some(outage));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let shutdown = engine::CancellationToken::new();
+    let service = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { serve(listener, &url, None, shutdown, QUICK).await }
+    });
+    let (mut client, _) = timeout(WAIT, connect_async(format!("ws://{addr}/ws")))
+        .await
+        .expect("the service accepts the client")
+        .expect("connect");
+    let (mut bids, mut asks) = (Levels::new(), Levels::new());
+    let (mut gate_open, mut halted) = (false, false);
+    let deadline = Instant::now() + 3 * WAIT;
+    let reopened = loop {
+        let frame = timeout_at(deadline, client.next())
+            .await
+            .expect("the market never reopened")
+            .expect("the service keeps the feed open")
+            .expect("a frame");
+        let Frame::Text(text) = frame else { continue };
+        match serde_json::from_str(text.as_str()).expect("feed message") {
+            FeedMessage::Snapshot {
+                bids: b, asks: a, ..
+            } => {
+                bids = b.iter().map(|l| (l.price, l.qty)).collect();
+                asks = a.iter().map(|l| (l.price, l.qty)).collect();
+            }
+            FeedMessage::Update {
+                bids: b,
+                asks: a,
+                events,
+                ..
+            } => {
+                patch(&mut bids, &b);
+                patch(&mut asks, &a);
+                match announced(&events) {
+                    Some(TradingStatus::Halted) => {
+                        halted = true;
+                        resume.send(()).expect("the source is waiting");
+                    }
+                    Some(TradingStatus::Open) => break true,
+                    None => {}
+                }
+            }
+            FeedMessage::Heartbeat { .. } => {}
+        }
+        if !gate_open && (&bids, &asks) == (&expected.0, &expected.1) {
+            gate_open = true;
+            open_gate.send(()).expect("the source is waiting");
+        }
+    };
+    assert!(reopened && halted, "halted, then reopened");
+    assert_eq!((&bids, &asks), (&expected.0, &expected.1), "book unchanged");
+    shutdown.cancel();
+    timeout(WAIT, service)
+        .await
+        .expect("the service did not stop")
+        .expect("service task")
+        .expect("service result");
+    fake.abort();
 }
 
 /// A recording writer that takes its time on every line.
@@ -603,7 +762,7 @@ async fn serve_with_broken_recording(broken: Broken) -> (io::Result<()>, bool) {
     let url = format!("ws://{}", source.local_addr().expect("addr"));
     let (served, _served_rx) = mpsc::unbounded_channel();
     let (_open_gate, gate) = mpsc::unbounded_channel();
-    let fake = fake_source(source, vec![whole_round(&fixture)], served, gate);
+    let fake = fake_source(source, vec![whole_round(&fixture)], served, gate, None);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let shutdown = engine::CancellationToken::new();
     let result = timeout(
@@ -644,6 +803,7 @@ async fn shutdown_completes_while_the_source_cannot_be_reached() {
     let url = format!("ws://{}", unused.local_addr().expect("addr"));
     drop(unused);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let shutdown = engine::CancellationToken::new();
     // A pause far longer than the test, so that the stop has to cut it short.
     let retry = Retry {
@@ -657,6 +817,9 @@ async fn shutdown_completes_while_the_source_cannot_be_reached() {
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!service.is_finished(), "the service waits to reconnect");
+    // Nothing was replayed, so there is nothing to halt: a halt would carry
+    // no time from the source.
+    assert_eq!(late_snapshot_status(addr).await, TradingStatus::Open);
     shutdown.cancel();
     timeout(WAIT, service)
         .await

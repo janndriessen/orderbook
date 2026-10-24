@@ -2,14 +2,21 @@
 //! commands go to the engine as they come, and a lost connection is replaced.
 //!
 //! Nothing is paced: a command goes to the engine the moment the push it
-//! belongs to is complete. When any of the seven connections fails (closed,
-//! lost, silent for too long, a message that does not apply, or no push has
-//! merged for too long although lines keep coming), all of them
-//! are dropped and opened again after a pause that doubles up to a limit. What
-//! was learned from the old connections is forgotten, but the flow keeps its
-//! translator, whose book mirrors what the engine holds, so the first push of
-//! the new connections replaces the whole book and the engine catches up with
-//! what it missed.
+//! belongs to is complete. While the connections are down the market is
+//! halted, so that clients can tell an outage from a quiet market. Timestamps
+//! come from the source and never from a clock here: the halt is stamped with
+//! the time of the last command sent, and none is sent before anything was
+//! replayed, as there is nothing to halt. The reopening is stamped with the
+//! time of the first command of the new connections, or with the time of
+//! their first push when the book did not change and it makes none.
+//!
+//! When any of the seven connections fails (closed, lost, silent for too
+//! long, a message that does not apply, or no push has merged for too long
+//! although lines keep coming), all of them are dropped and opened again after
+//! a pause that doubles up to a limit. What was learned from the old
+//! connections is forgotten, but the flow keeps its translator, whose book
+//! mirrors what the engine holds, so the first push of the new connections
+//! replaces the whole book and the engine catches up with what it missed.
 
 use std::io::{self, Write};
 use std::iter;
@@ -17,6 +24,7 @@ use std::time::Duration;
 
 use engine::{CancellationToken, Step};
 use hyperliquid_recorder::{CONNECTIONS, Connections};
+use protocol::{Command, TradingStatus, Ts};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
@@ -72,6 +80,40 @@ enum Outcome {
     Failed(String),
     /// The engine no longer takes commands.
     EngineGone,
+}
+
+/// What outlives one set of connections: how many lines all of them have
+/// delivered, and what the engine was last told, which decides whether a
+/// status command is needed and what time it carries.
+#[derive(Default)]
+struct Sent {
+    /// Lines of all connections so far.
+    number: usize,
+    /// The time of the latest command sent, 0 while none was; later commands
+    /// never go back.
+    ts: Ts,
+    halted: bool,
+}
+
+impl Sent {
+    /// Sends `status` at `ts` unless the engine already has it, or unless
+    /// it is a halt before any command was sent: the book is empty, there is
+    /// nothing to halt, and the halt would carry no time from the source.
+    /// Returns false when the engine no longer takes commands.
+    async fn status(&mut self, steps: &mpsc::Sender<Step>, status: TradingStatus, ts: Ts) -> bool {
+        let halt = status == TradingStatus::Halted;
+        if self.halted == halt || (halt && self.ts == 0) {
+            return true;
+        }
+        self.halted = status == TradingStatus::Halted;
+        self.ts = self.ts.max(ts);
+        let step = Step {
+            command: Command::SetTradingStatus { status },
+            ts: self.ts,
+            wait: Duration::ZERO,
+        };
+        steps.send(step).await.is_ok()
+    }
 }
 
 /// Lines waiting for the recording's writer thread.
@@ -203,15 +245,15 @@ async fn feed_loop(
     retry: Retry,
 ) -> io::Result<()> {
     let mut flow = L2Flow::new(engine::market(), CONNECTIONS);
-    let mut number = 0;
     let mut backoff = retry.initial;
+    let mut sent = Sent::default();
     loop {
         let run = connected(
             url,
             &mut flow,
             steps,
             record,
-            &mut number,
+            &mut sent,
             &mut backoff,
             retry,
         );
@@ -229,6 +271,10 @@ async fn feed_loop(
             "connections to the source ended, opening them again"
         );
         flow.reset_connection();
+        // Stopping returns above and sends nothing.
+        if !sent.status(steps, TradingStatus::Halted, sent.ts).await {
+            return Ok(());
+        }
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             () = sleep(backoff) => {}
@@ -238,8 +284,11 @@ async fn feed_loop(
 }
 
 /// Opens the connections and feeds their lines through `flow` until one
-/// fails. `number` counts the lines of all connections so far, and `backoff`
-/// is put back to `retry.initial` when lines make commands. A connection that
+/// fails. The market is reopened, if it is halted, when the first push of the
+/// new connections merges, before that push's commands.
+///
+/// `sent.number` counts the lines of all connections so far, and `backoff` is
+/// put back to `retry.initial` when lines make commands. A connection that
 /// merges no push and skips no stale book with a later time than before for
 /// `retry.progress` fails, the first push included: opening is done by then,
 /// and the first push needs only one book per grouping.
@@ -248,7 +297,7 @@ async fn connected(
     flow: &mut L2Flow,
     steps: &mpsc::Sender<Step>,
     record: &mut Option<Recorder>,
-    number: &mut usize,
+    sent: &mut Sent,
     backoff: &mut Duration,
     retry: Retry,
 ) -> io::Result<Outcome> {
@@ -275,8 +324,8 @@ async fn connected(
         if let Some(recorder) = record.as_mut() {
             recorder.write(text.clone()).await?;
         }
-        *number += 1;
-        let commands = match flow.line(*number, &text) {
+        sent.number += 1;
+        let commands = match flow.line(sent.number, &text) {
             Ok(commands) => commands,
             Err(err) => return Ok(Outcome::Failed(err.to_string())),
         };
@@ -285,7 +334,18 @@ async fn connected(
         if !commands.is_empty() {
             *backoff = retry.initial;
         }
+        // The first push of the new connections reopens the market even when
+        // it leaves the book unchanged and so makes no commands. Its commands
+        // are stamped no later than the push, so the opening takes the first
+        // one's time to keep the times from going back.
+        if let Some(merged) = flow.last_merged() {
+            let ts = commands.first().map_or(merged, |&(ts, _)| ts);
+            if !sent.status(steps, TradingStatus::Open, ts).await {
+                return Ok(Outcome::EngineGone);
+            }
+        }
         for (ts, command) in commands {
+            sent.ts = sent.ts.max(ts);
             let step = Step {
                 command,
                 ts,

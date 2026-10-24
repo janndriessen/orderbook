@@ -8,8 +8,9 @@
 //! 5 seconds without an `l2` message on one of them, or 10 seconds without a
 //! push merging or a stale book being skipped) all of them are opened again
 //! after a pause that starts at 1 second and doubles up to 30 seconds; the
-//! engine keeps its book meanwhile and catches up with the first push of the
-//! new connections. Ctrl-C stops the service and the connections.
+//! engine keeps its book meanwhile, with trading halted until the first push
+//! of the new connections, with which it catches up. Ctrl-C stops the service
+//! and the connections.
 //!
 //! Settings come from the environment: `ORDERBOOK_ADDR` (default
 //! `127.0.0.1:8080`), `LIVE_RECORD_PATH` (optional; also writes every line
