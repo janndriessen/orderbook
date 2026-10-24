@@ -41,6 +41,12 @@ const _: () = assert!(
     "TICK must divide HEARTBEAT_INTERVAL exactly"
 );
 
+/// Pending events at which an update is published without waiting for the
+/// tick. Bounds a message: production feeds cap message size and send more
+/// messages instead, where one tick could otherwise carry a whole burst
+/// (100,000 events are several megabytes of JSON).
+pub const MAX_EVENTS_PER_UPDATE: usize = 2_000;
+
 /// Messages a client may fall behind by before it is disconnected: about six
 /// seconds at the 100 ms tick.
 pub const BROADCAST_CAPACITY: usize = 64;
@@ -60,7 +66,7 @@ pub struct Subscription {
 pub struct Publisher {
     market: MarketInfo,
     book: AggregatedBook,
-    /// Events received since the last tick. They reach neither the book nor
+    /// Events received since the last update. They reach neither the book nor
     /// `recent` until the tick that publishes them, so a snapshot never
     /// contains something the next update would deliver again.
     pending: Vec<Envelope<Event>>,
@@ -93,15 +99,29 @@ impl Publisher {
         std::mem::take(&mut self.stats)
     }
 
-    /// Queues the events of one command for the next tick.
+    /// Queues the events of one command for the next update.
     ///
-    /// They are taken together, so no tick can publish part of a command's
-    /// events and leave the rest for the next update.
+    /// They are taken together and never split, so no update holds part of a
+    /// command's events. When the queue would pass [`MAX_EVENTS_PER_UPDATE`]
+    /// with this command, what was queued before it is published first; when
+    /// it reaches the cap, it is published at once. A command larger than the
+    /// cap therefore goes out alone in one update, and all of this uses the
+    /// same gap-free positions as a tick.
+    ///
+    /// A burst can thus send many updates in a row, and a client that has not
+    /// read for [`BROADCAST_CAPACITY`] of them is disconnected, so a stalled
+    /// client is dropped after a smaller burst than before the cap.
     pub fn ingest(&mut self, events: Vec<Envelope<Event>>) {
+        if !self.pending.is_empty() && self.pending.len() + events.len() > MAX_EVENTS_PER_UPDATE {
+            self.publish();
+        }
         self.pending.extend(events);
+        if self.pending.len() >= MAX_EVENTS_PER_UPDATE {
+            self.publish();
+        }
     }
 
-    /// Publishes everything ingested since the last tick as one update.
+    /// Publishes everything ingested since the last update as one update.
     ///
     /// Returns the update's feed position, or `None` when nothing changed. An
     /// idle tick sends no update and consumes no position, so positions stay
@@ -114,6 +134,22 @@ impl Publisher {
     /// flow log shows the other events. Forwarded events keep the engine's
     /// `seq`, which therefore skips the numbers of the `L2Update`s.
     pub fn tick(&mut self) -> Option<Seq> {
+        if let Some(seq) = self.publish() {
+            return Some(seq);
+        }
+        self.idle_ticks += 1;
+        if self.idle_ticks >= IDLE_TICKS_PER_HEARTBEAT {
+            self.idle_ticks = 0;
+            let _ = self
+                .updates
+                .send(encode(&FeedMessage::Heartbeat { seq: self.seq }));
+        }
+        None
+    }
+
+    /// Turns the pending events and level changes into the next update, if
+    /// there are any.
+    fn publish(&mut self) -> Option<Seq> {
         let mut events = Vec::new();
         let mut newest_ts = None;
         for envelope in std::mem::take(&mut self.pending) {
@@ -124,13 +160,6 @@ impl Publisher {
             }
         }
         if events.is_empty() && !self.book.has_changes() {
-            self.idle_ticks += 1;
-            if self.idle_ticks >= IDLE_TICKS_PER_HEARTBEAT {
-                self.idle_ticks = 0;
-                let _ = self
-                    .updates
-                    .send(encode(&FeedMessage::Heartbeat { seq: self.seq }));
-            }
             return None;
         }
         self.idle_ticks = 0;
@@ -417,6 +446,75 @@ mod tests {
         assert_eq!(trades, 2, "both trades arrive together");
         assert_eq!(asks, vec![lvl(101, 0), lvl(102, 0)], "with both levels");
         assert_eq!(publisher.tick(), None, "nothing of it is left for later");
+    }
+
+    /// A command of `size` events: `size - 1` flow events and one level change.
+    fn command(first_seq: Seq, size: usize) -> Vec<Envelope<Event>> {
+        let mut events: Vec<_> = (1..size as u64)
+            .map(|i| accepted(first_seq + i, first_seq))
+            .collect();
+        events.push(l2(
+            first_seq,
+            Side::Buy,
+            100 + (first_seq % 7) as Price,
+            first_seq,
+        ));
+        events
+    }
+
+    #[test]
+    fn a_burst_is_split_into_bounded_gap_free_updates_with_the_same_result() {
+        let sizes = [1_500, 1_500, 700, 5_000, 100];
+        let mut split = Publisher::new(market());
+        let mut whole = Publisher::new(market());
+        let mut rx = split.subscribe().updates;
+        let mut client = Client::default();
+        let mut flow_seqs = Vec::new();
+        let mut first_seq = 1;
+        for size in sizes {
+            let events = command(first_seq, size);
+            flow_seqs.extend(
+                events
+                    .iter()
+                    .filter(|e| !matches!(e.body, Event::L2Update { .. }))
+                    .map(|e| e.seq),
+            );
+            split.ingest(events.clone());
+            // `whole` is ticked only at the end, so it sends one big update;
+            // ingesting past the cap would split it too.
+            whole.pending.extend(events);
+            first_seq += size as u64;
+        }
+        split.tick();
+        whole.tick();
+
+        let mut event_counts = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            let message = serde_json::from_str(frame.as_str()).expect("valid frame");
+            if let FeedMessage::Update { events, .. } = &message {
+                event_counts.push(events.len());
+            }
+            client.apply(message); // asserts the positions are gap-free
+        }
+        // Only the 5,000-event command exceeds the cap, and it goes alone.
+        assert_eq!(event_counts, vec![1_499, 1_499, 699, 4_999, 99]);
+        assert_eq!(client.seq, 5);
+        assert_eq!(client.event_seqs, flow_seqs, "nothing lost, in order");
+        let (bids, asks) = whole.book.levels();
+        let levels = |levels: Vec<Level>| -> BTreeMap<Price, Qty> {
+            levels.into_iter().map(|l| (l.price, l.qty)).collect()
+        };
+        assert_eq!((client.bids, client.asks), (levels(bids), levels(asks)));
+    }
+
+    #[test]
+    fn a_command_that_reaches_the_cap_is_published_without_a_tick() {
+        let mut publisher = Publisher::new(market());
+        publisher.ingest(command(1, MAX_EVENTS_PER_UPDATE - 1));
+        assert_eq!(publisher.seq, 0, "below the cap it waits for the tick");
+        publisher.ingest(command(5_000, 1));
+        assert_eq!(publisher.seq, 1);
+        assert_eq!(publisher.tick(), None, "nothing is left for the tick");
     }
 
     #[test]

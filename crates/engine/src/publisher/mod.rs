@@ -1,8 +1,9 @@
 //! Turns the engine's event stream into the sequenced market-data feed.
 //!
 //! A single Tokio task owns the [`Publisher`]. It collects events as they
-//! arrive, publishes one combined update every [`TICK`] and answers
-//! subscription requests between ticks. Every [`stats::WINDOW`] it logs how
+//! arrive, publishes one combined update every [`TICK`], or sooner when a
+//! burst reaches `MAX_EVENTS_PER_UPDATE`, and answers subscription requests
+//! between ticks. Every [`stats::WINDOW`] it logs how
 //! many updates, events and bytes it sent.
 
 mod book;
