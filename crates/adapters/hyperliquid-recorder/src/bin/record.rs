@@ -6,7 +6,8 @@
 //! `hyperliquid_recorder` library. The run ends with an error, and there is no
 //! reconnect because a gap in a recording would be silent, when any connection
 //! is closed or lost, a message is not valid JSON (it is never written), or a
-//! feed stays silent for 30 seconds.
+//! feed stays silent (30 seconds without a full book snapshot, 5 seconds
+//! without an `l2` message).
 //!
 //! Settings come from the environment: `RECORD_PATH` (default
 //! `data/hyperliquid-btc-<unix seconds>.jsonl`; an existing file is never

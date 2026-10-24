@@ -32,7 +32,7 @@
 //! - no full book snapshot (more than 5 levels on a side) arrives on the main
 //!   connection for 30 seconds, which catches a stalled standard feed that the
 //!   fast feed would otherwise hide, and a silent main connection with it;
-//! - no `l2` message arrives on one of the seven connections for 30 seconds.
+//! - no `l2` message arrives on one of the seven connections for 5 seconds.
 //!
 //! Acknowledgements, `pong` replies and `error` messages count as no progress.
 
@@ -50,10 +50,16 @@ use tracing::warn;
 /// The address of Hyperliquid's public WebSocket.
 pub const URL: &str = "wss://api.hyperliquid.xyz/ws";
 
-/// How long a feed may stay silent before its connection counts as dead: the
-/// full book snapshots come about every 5 seconds, `l2` messages about every
-/// half second.
-const IDLE_LIMIT: Duration = Duration::from_secs(30);
+/// How long the main connection may go without a full book snapshot before it
+/// counts as dead: they come only about every 5 seconds.
+const FULL_BOOK_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long a connection may go without an `l2` message before it counts as
+/// dead. Measured over minutes, every connection sends one about every half
+/// second (median 540 ms) and the longest gap on any of them, the coarsest
+/// grouping included, was 625 ms, so this is eight times that. A live feed
+/// that stops this long has stalled, and waiting longer only freezes the book.
+const L2_LIMIT: Duration = Duration::from_secs(5);
 
 /// How often the documented application-level ping is sent, so that an idle
 /// rule on the server side cannot close the connection.
@@ -151,8 +157,8 @@ struct Deadlines {
 impl Deadlines {
     fn new(now: Instant) -> Self {
         Self {
-            full_book: now + IDLE_LIMIT,
-            l2: [now + IDLE_LIMIT; CONNECTIONS],
+            full_book: now + FULL_BOOK_LIMIT,
+            l2: [now + L2_LIMIT; CONNECTIONS],
         }
     }
 
@@ -160,10 +166,10 @@ impl Deadlines {
     /// meets.
     fn note(&mut self, connection: usize, received: &Received, now: Instant) {
         if connection == 0 && *received == Received::FullBook {
-            self.full_book = now + IDLE_LIMIT;
+            self.full_book = now + FULL_BOOK_LIMIT;
         }
         if *received == Received::L2 {
-            self.l2[connection] = now + IDLE_LIMIT;
+            self.l2[connection] = now + L2_LIMIT;
         }
     }
 
@@ -172,13 +178,15 @@ impl Deadlines {
         self.l2.iter().copied().fold(self.full_book, Instant::min)
     }
 
-    /// What has gone silent for too long at `now`, if anything.
-    fn missed(&self, now: Instant) -> Option<String> {
+    /// What has gone silent for too long at `now`, if anything, and the limit
+    /// it exceeded.
+    fn missed(&self, now: Instant) -> Option<(String, Duration)> {
         if now >= self.full_book {
-            return Some("no full book snapshot".to_owned());
+            return Some(("no full book snapshot".to_owned(), FULL_BOOK_LIMIT));
         }
         let grouping = self.l2.iter().position(|deadline| now >= *deadline)?;
-        Some(format!("no l2 message for {}", l2_subscription(grouping)))
+        let what = format!("no l2 message for {}", l2_subscription(grouping));
+        Some((what, L2_LIMIT))
     }
 }
 
@@ -293,7 +301,8 @@ pub struct Connections {
 
 impl Connections {
     /// Opens one connection per `l2` price grouping to `url` and subscribes
-    /// each to its feeds. The 30-second silence limits start now.
+    /// each to its feeds. The silence limits (30 s without a full book, 5 s
+    /// without an `l2` message) start now.
     ///
     /// # Errors
     ///
@@ -350,22 +359,13 @@ impl Connections {
     pub async fn next(&mut self) -> Result<Value, Error> {
         loop {
             let lines = self.lines;
+            // Biased, messages first: a deadline is stamped when a message is
+            // read here, so a caller that was away for longer than a limit
+            // (engine backpressure, a slow disk, a sleeping laptop) finds
+            // expired deadlines next to messages that arrived in time.
+            // Picking at random would report a healthy connection silent.
             tokio::select! {
-                () = sleep_until(self.deadlines.next()) => {
-                    if let Some(what) = self.deadlines.missed(Instant::now()) {
-                        return Err(Error::Silent { what, limit: IDLE_LIMIT, lines });
-                    }
-                }
-                _ = self.ping.tick() => {
-                    for (connection, sink) in self.sinks.iter_mut().enumerate() {
-                        let ping = Message::text(json!({"method": "ping"}).to_string());
-                        sink.send(ping).await.map_err(|source| Error::Send {
-                            connection,
-                            lines,
-                            source,
-                        })?;
-                    }
-                }
+                biased;
                 Some((connection, message)) = self.received.next() => match message {
                     Some(Ok(Message::Text(text))) => {
                         let mut value = serde_json::from_str::<Value>(&text)
@@ -385,6 +385,21 @@ impl Connections {
                     }
                     None => return Err(Error::Closed { connection, lines }),
                 },
+                _ = self.ping.tick() => {
+                    for (connection, sink) in self.sinks.iter_mut().enumerate() {
+                        let ping = Message::text(json!({"method": "ping"}).to_string());
+                        sink.send(ping).await.map_err(|source| Error::Send {
+                            connection,
+                            lines,
+                            source,
+                        })?;
+                    }
+                }
+                () = sleep_until(self.deadlines.next()) => {
+                    if let Some((what, limit)) = self.deadlines.missed(Instant::now()) {
+                        return Err(Error::Silent { what, limit, lines });
+                    }
+                }
             }
         }
     }
@@ -463,13 +478,16 @@ mod tests {
         // Its silence is named like any other connection's.
         let start = Instant::now();
         let mut deadlines = Deadlines::new(start);
-        deadlines.note(0, &Received::FullBook, start + IDLE_LIMIT / 2);
+        deadlines.note(0, &Received::FullBook, start + L2_LIMIT / 2);
         for connection in 0..last {
-            deadlines.note(connection, &Received::L2, start + IDLE_LIMIT / 2);
+            deadlines.note(connection, &Received::L2, start + L2_LIMIT / 2);
         }
         assert_eq!(
-            deadlines.missed(start + IDLE_LIMIT).as_deref(),
-            Some(r#"no l2 message for {"c":"BTC","type":"l2"}"#)
+            deadlines.missed(start + L2_LIMIT),
+            Some((
+                r#"no l2 message for {"c":"BTC","type":"l2"}"#.to_owned(),
+                L2_LIMIT
+            ))
         );
     }
 
@@ -540,38 +558,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn messages_buffered_while_the_caller_was_away_are_not_reported_silent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds a local port");
+        let addr = listener.local_addr().expect("has an address");
+        tokio::spawn(async move {
+            let mut open = Vec::new();
+            for _ in 0..CONNECTIONS {
+                let (tcp, _) = listener.accept().await.expect("accepts");
+                let mut socket = tokio_tungstenite::accept_async(tcp)
+                    .await
+                    .expect("handshakes");
+                let l2 = json!({"channel": "l2", "data": {}}).to_string();
+                socket.send(Message::text(l2)).await.expect("sends");
+                open.push(socket);
+            }
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(L2_LIMIT * 3, async {
+            let mut connections = Connections::connect(&format!("ws://{addr}"))
+                .await
+                .expect("connects");
+            // Longer than every l2 limit, with one message per connection
+            // waiting: each read must return it instead of the expired limit.
+            tokio::time::sleep(L2_LIMIT + Duration::from_millis(500)).await;
+            for _ in 0..CONNECTIONS {
+                connections.next().await?;
+            }
+            Ok::<(), Error>(())
+        })
+        .await
+        .expect("the reads do not hang");
+        result.expect("buffered messages are handed out, not reported silent");
+    }
+
     #[test]
     fn each_connection_has_its_own_l2_deadline() {
         let start = Instant::now();
         let mut deadlines = Deadlines::new(start);
-        let later = start + IDLE_LIMIT / 2;
+        let later = start + L2_LIMIT / 2;
         // Every connection but number 2 sends l2, and the main one sends a
         // full book; number 2 still runs out at the first limit.
         for connection in [0, 1, 3, 4, 5, 6] {
             deadlines.note(connection, &Received::L2, later);
         }
         deadlines.note(0, &Received::FullBook, later);
-        assert_eq!(deadlines.next(), start + IDLE_LIMIT);
+        assert_eq!(deadlines.next(), start + L2_LIMIT);
         assert_eq!(
-            deadlines.missed(start + IDLE_LIMIT - Duration::from_millis(1)),
+            deadlines.missed(start + L2_LIMIT - Duration::from_millis(1)),
             None
         );
         assert_eq!(
-            deadlines.missed(start + IDLE_LIMIT).as_deref(),
-            Some(r#"no l2 message for {"c":"BTC","m":5,"s":5,"type":"l2"}"#)
+            deadlines.missed(start + L2_LIMIT),
+            Some((
+                r#"no l2 message for {"c":"BTC","m":5,"s":5,"type":"l2"}"#.to_owned(),
+                L2_LIMIT
+            ))
         );
         deadlines.note(2, &Received::L2, later);
-        assert_eq!(deadlines.missed(start + IDLE_LIMIT), None);
-        assert_eq!(deadlines.next(), later + IDLE_LIMIT);
+        assert_eq!(deadlines.missed(start + L2_LIMIT), None);
+        assert_eq!(deadlines.next(), later + L2_LIMIT);
     }
 
     #[test]
     fn only_a_full_book_on_the_main_connection_keeps_its_deadline_alive() {
         let start = Instant::now();
         let mut deadlines = Deadlines::new(start);
-        let later = start + IDLE_LIMIT / 2;
+        let later = start + FULL_BOOK_LIMIT / 2;
+        // Just inside the full book's limit, so that the l2 deadlines outlast it.
+        let l2_at = start + FULL_BOOK_LIMIT - Duration::from_millis(1);
         for connection in 0..CONNECTIONS {
-            deadlines.note(connection, &Received::L2, later);
+            deadlines.note(connection, &Received::L2, l2_at);
         }
         for connection in 1..CONNECTIONS {
             deadlines.note(connection, &Received::FullBook, later);
@@ -579,13 +638,37 @@ mod tests {
         deadlines.note(0, &Received::Other, later);
         // The full book is now the only deadline left at the first limit, so
         // the loop must wake for it even while every l2 feed is flowing.
-        assert_eq!(deadlines.next(), start + IDLE_LIMIT);
+        assert_eq!(deadlines.next(), start + FULL_BOOK_LIMIT);
         assert_eq!(
-            deadlines.missed(start + IDLE_LIMIT).as_deref(),
-            Some("no full book snapshot")
+            deadlines.missed(start + FULL_BOOK_LIMIT),
+            Some(("no full book snapshot".to_owned(), FULL_BOOK_LIMIT))
         );
         deadlines.note(0, &Received::FullBook, later);
-        assert_eq!(deadlines.missed(start + IDLE_LIMIT), None);
+        assert_eq!(deadlines.missed(start + FULL_BOOK_LIMIT), None);
+    }
+
+    #[test]
+    fn the_l2_deadline_is_missed_long_before_the_full_book_one() {
+        let start = Instant::now();
+        let deadlines = Deadlines::new(start);
+        assert_eq!(deadlines.next(), start + L2_LIMIT);
+        let (what, limit) = deadlines.missed(start + L2_LIMIT).expect("an l2 deadline");
+        assert!(what.starts_with("no l2 message"), "{what}");
+        assert_eq!(limit, L2_LIMIT);
+        // Keeping every l2 feed alive leaves the full book's own, longer one.
+        let mut deadlines = deadlines;
+        for connection in 0..CONNECTIONS {
+            deadlines.note(
+                connection,
+                &Received::L2,
+                start + L2_LIMIT - Duration::from_millis(1),
+            );
+        }
+        assert_eq!(deadlines.missed(start + L2_LIMIT), None);
+        assert_eq!(
+            deadlines.missed(start + FULL_BOOK_LIMIT),
+            Some(("no full book snapshot".to_owned(), FULL_BOOK_LIMIT))
+        );
     }
 
     #[test]
