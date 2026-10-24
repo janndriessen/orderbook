@@ -1287,6 +1287,69 @@ mod tests {
     }
 
     #[test]
+    fn a_push_that_merges_only_with_a_second_book_is_released_then() {
+        // The $10 grouping's first book at 1,000 has a level that is no $10
+        // bucket, so the push does not merge; its second book does.
+        let not_a_bucket = l2_line(
+            4,
+            None,
+            1_000,
+            &[(81_000, "1.0"), (80_995, "2.0")],
+            &[(81_010, "1.0")],
+        );
+        let lines = [
+            fine(1_000, "1.0"),
+            not_a_bucket,
+            coarse(1_000, "1.0"),
+            trade_line(1_500, "B", 81_001),
+            fine(2_000, "0.8"),
+            coarse(2_000, "0.8"),
+        ];
+        let (per_line, stats) = flow_run(&lines);
+        assert_eq!(stats.failed_merges, 1);
+        assert_eq!(stats.reapplied_pushes, 1);
+        assert!(!per_line[2].is_empty(), "the second book releases the push");
+        // The push at 1,000 started the book, so the trade at 1,500 is not
+        // the backlog of the next push.
+        assert_eq!(stats.dropped_trades, 0);
+        let all: Vec<(Ts, Command)> = per_line.concat();
+        let at_2_000 = all
+            .iter()
+            .position(|&(ts, _)| ts == 2_000_000)
+            .expect("a command at push 2,000");
+        assert!(is_ioc(&all[at_2_000].1));
+        assert_eq!(stats.divergence, Divergence::default());
+    }
+
+    #[test]
+    fn books_behind_the_replayed_time_after_a_reset_are_skipped() {
+        let mut flow = L2Flow::new(engine::market(), 2);
+        let mut number = 0;
+        let mut feed = |flow: &mut L2Flow, lines: &[String]| -> Result<usize, LoadError> {
+            let mut made = 0;
+            for line in lines {
+                number += 1;
+                made += flow.line(number, line)?.len();
+            }
+            Ok(made)
+        };
+        let first = [both(2_000, "1.0"), both(3_000, "0.9")].concat();
+        assert!(feed(&mut flow, &first).expect("accepts") > 0);
+        flow.reset_connection();
+        // The new connections' clock is behind the pushes already replayed.
+        let behind = [both(2_500, "0.7")].concat();
+        assert_eq!(feed(&mut flow, &behind).expect("skipped, not an error"), 0);
+        let after = [both(4_000, "0.8")].concat();
+        assert!(feed(&mut flow, &after).expect("accepts") > 0);
+        // Every grouping is past the replayed time now: going back is an
+        // error again.
+        let err = feed(&mut flow, &[fine(3_500, "0.8")]).expect_err("backwards");
+        assert!(matches!(err, LoadError::Backwards { .. }), "{err}");
+        let (_, stats) = flow.finish();
+        assert_eq!(stats.stale_books, 2);
+    }
+
+    #[test]
     fn a_book_older_than_the_released_push_is_backwards() {
         let mut flow = L2Flow::new(engine::market(), 2);
         for (number, line) in both(1_000, "1.0").iter().enumerate() {

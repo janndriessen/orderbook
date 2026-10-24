@@ -8,6 +8,7 @@
 //! book is the one `load` makes of the recording with those lines added.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -423,12 +424,15 @@ fn expected_of(round: &Round) -> (Levels, Levels) {
 /// source that plays several rounds closes its connections after each but the
 /// last only once the client's book equals `checkpoint`, so that the
 /// connections are lost with the book of the round already in the engine.
-/// Returns how many connections the source accepted.
+/// The lines received are also given to `record`. Returns how many
+/// connections the source accepted and how long the book took to reach
+/// `expected`.
 async fn follow(
     rounds: Vec<Round>,
     checkpoint: Option<(Levels, Levels)>,
     expected: (Levels, Levels),
-) -> usize {
+    record: Option<Box<dyn Write + Send>>,
+) -> (usize, Duration) {
     assert!(!expected.0.is_empty() && !expected.1.is_empty());
     let source = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("ws://{}", source.local_addr().expect("addr"));
@@ -442,8 +446,9 @@ async fn follow(
     let shutdown = engine::CancellationToken::new();
     let service = tokio::spawn({
         let shutdown = shutdown.clone();
-        async move { serve(listener, &url, None, shutdown, QUICK).await }
+        async move { serve(listener, &url, record, shutdown, QUICK).await }
     });
+    let started = Instant::now();
     let (mut client, _) = timeout(WAIT, connect_async(format!("ws://{addr}/ws")))
         .await
         .expect("the service accepts the client")
@@ -504,6 +509,7 @@ async fn follow(
             break;
         }
     }
+    let took = started.elapsed();
     let connections = timeout(WAIT, served_rx.recv())
         .await
         .expect("the source finished")
@@ -516,7 +522,7 @@ async fn follow(
         .expect("service task")
         .expect("service result");
     fake.abort();
-    connections
+    (connections, took)
 }
 
 #[tokio::test]
@@ -524,7 +530,7 @@ async fn the_book_ends_as_the_recording_does() {
     let fixture = recording();
     let round = whole_round(&fixture);
     let expected = expected_of(&round);
-    let connections = follow(vec![round], None, expected).await;
+    let (connections, _) = follow(vec![round], None, expected, None).await;
     assert_eq!(connections, CONNECTIONS);
 }
 
@@ -539,12 +545,95 @@ async fn the_book_ends_right_after_the_source_drops_every_connection_once() {
     let rounds = split_rounds(&fixture, split);
     let checkpoint = expected_of(&rounds[0]);
     assert_ne!(checkpoint, expected, "the book moves after the cut");
-    let connections = follow(rounds, Some(checkpoint), expected).await;
+    let (connections, _) = follow(rounds, Some(checkpoint), expected, None).await;
     assert_eq!(
         connections,
         2 * CONNECTIONS,
         "every connection was reopened"
     );
+}
+
+/// A recording writer that takes its time on every line.
+struct Slow;
+
+impl Write for Slow {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A recording writer that fails, or panics, on its first line.
+struct Broken {
+    panic: bool,
+}
+
+impl Write for Broken {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        assert!(!self.panic, "the disk caught fire");
+        Err(io::Error::other("disk full"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_slow_recording_does_not_hold_up_the_book() {
+    // The runtime of a test has one thread: a write on the connections task
+    // would stall everything for 20 ms per line, some 3 s for the fixture.
+    let fixture = recording();
+    let round = whole_round(&fixture);
+    let expected = expected_of(&round);
+    let (_, took) = follow(vec![round], None, expected, Some(Box::new(Slow))).await;
+    assert!(took < Duration::from_millis(1500), "the book took {took:?}");
+}
+
+/// Serves the fixture to a service whose recording writer is `broken`, and
+/// returns what `serve` returns, which it must do on its own.
+async fn serve_with_broken_recording(broken: Broken) -> (io::Result<()>, bool) {
+    let fixture = recording();
+    let source = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("ws://{}", source.local_addr().expect("addr"));
+    let (served, _served_rx) = mpsc::unbounded_channel();
+    let (_open_gate, gate) = mpsc::unbounded_channel();
+    let fake = fake_source(source, vec![whole_round(&fixture)], served, gate);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let shutdown = engine::CancellationToken::new();
+    let result = timeout(
+        WAIT,
+        serve(
+            listener,
+            &url,
+            Some(Box::new(broken)),
+            shutdown.clone(),
+            QUICK,
+        ),
+    )
+    .await
+    .expect("the service did not stop on its own");
+    fake.abort();
+    (result, shutdown.is_cancelled())
+}
+
+#[tokio::test]
+async fn a_recording_that_cannot_be_written_stops_the_service_with_its_error() {
+    let (result, cancelled) = serve_with_broken_recording(Broken { panic: false }).await;
+    let err = result.expect_err("the service reports the failure");
+    assert!(err.to_string().contains("disk full"), "{err}");
+    assert!(cancelled);
+}
+
+#[tokio::test]
+async fn a_recording_writer_that_panics_stops_the_service_with_an_error() {
+    let (result, _) = serve_with_broken_recording(Broken { panic: true }).await;
+    let err = result.expect_err("the service reports the failure");
+    assert!(err.to_string().contains("panicked"), "{err}");
 }
 
 #[tokio::test]

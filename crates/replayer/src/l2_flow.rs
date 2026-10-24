@@ -11,11 +11,11 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use hyperliquid_adapter::{
-    BookSnapshot, Divergence, Grouping, L2Decoder, MergeError, Message, Trade, Translator, WireL2,
-    merge,
+    BookSnapshot, Divergence, Grouping, L2Decoder, MergeError, Merged, Message, Trade, Translator,
+    WireL2, merge,
 };
 use protocol::{Command, MarketInfo, Ts};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{Classified, Feed, LoadError, classify, message, mismatch};
 
@@ -45,6 +45,9 @@ pub struct L2Stats {
     /// Pushes merged and translated again because a grouping sent a second
     /// book at the time of a push already released.
     pub reapplied_pushes: usize,
+    /// Books skipped after a reset because their time was at or before a push
+    /// already released: the source's clock stepped back.
+    pub stale_books: usize,
     /// Push times before the one at which the last grouping sent its first
     /// book, which were left out.
     pub startup_pushes: usize,
@@ -106,6 +109,12 @@ pub struct L2Flow {
     /// The complete push released last, with the books it was made from, for
     /// a grouping that sends another book at the same time.
     released: Option<(Ts, Push)>,
+    /// Set by a reset until every grouping has a book past `done_through`:
+    /// books at or before it are then skipped instead of an error.
+    recovering: bool,
+    warned_stale: bool,
+    /// Whether the push in `released` merged when it was released.
+    released_merged: bool,
     /// The time of the first push that merged since the connections were
     /// opened; trades at or before it are the backlog.
     first_merged: Option<Ts>,
@@ -130,6 +139,9 @@ impl L2Flow {
             all_started: 0,
             pending: BTreeMap::new(),
             released: None,
+            released_merged: false,
+            recovering: false,
+            warned_stale: false,
             first_merged: None,
             trades: Vec::new(),
             out: Vec::new(),
@@ -239,7 +251,16 @@ impl L2Flow {
             return Ok(std::mem::take(&mut self.out));
         }
         if self.done_through.is_some_and(|done| ts <= done) {
-            return Err(LoadError::Backwards { line });
+            if !self.recovering {
+                return Err(LoadError::Backwards { line });
+            }
+            // New connections of a source whose clock stepped back: its books
+            // are skipped until its time passes what was already replayed.
+            self.stats.stale_books += 1;
+            if !std::mem::replace(&mut self.warned_stale, true) {
+                warn!(ts, done_through = ?self.done_through, "the source's time is behind what was already replayed, skipping its books until it catches up");
+            }
+            return Ok(Vec::new());
         }
         self.pending.entry(ts).or_default().insert(grouping, book);
         match self.latest.entry(grouping) {
@@ -254,6 +275,7 @@ impl L2Flow {
         // Every grouping has sent a book after the pushes before the earliest
         // of the latest ones, so none of them can still complete.
         if self.latest.len() == self.groupings {
+            self.recovering = false;
             let settled = self.latest.values().min().copied().unwrap_or(0);
             while let Some(entry) = self.pending.first_entry()
                 && *entry.key() < settled
@@ -287,6 +309,8 @@ impl L2Flow {
         self.all_started = 0;
         self.pending.clear();
         self.released = None;
+        self.recovering = true;
+        self.warned_stale = false;
         self.last_merged = None;
         self.first_merged = None;
         self.trades.clear();
@@ -321,7 +345,14 @@ impl L2Flow {
         match merge(&inputs) {
             Ok(merged) => {
                 self.stats.reapplied_pushes += 1;
-                self.out.extend(self.translator.on_snapshot(&merged.book));
+                if self.released_merged {
+                    self.out.extend(self.translator.on_snapshot(&merged.book));
+                } else {
+                    // The push did not merge when it was released; this is
+                    // the release it never had.
+                    self.released_merged = true;
+                    self.release(ts, &merged);
+                }
             }
             Err(error) => {
                 debug!(ts, %error, "push at the same time does not merge, left as it was")
@@ -344,6 +375,7 @@ impl L2Flow {
             return;
         }
         self.released = Some((ts, push.clone()));
+        self.released_merged = false;
         let inputs: Vec<(Grouping, &BookSnapshot)> = push
             .iter()
             .map(|(&grouping, book)| (grouping, book))
@@ -356,6 +388,14 @@ impl L2Flow {
                 return;
             }
         };
+        self.released_merged = true;
+        self.release(ts, &merged);
+    }
+
+    /// Emits the commands of the merged push at `ts`: the trades it holds,
+    /// then its snapshot. The first one since the connections were opened
+    /// starts the book, and drops the trades up to it as the backlog.
+    fn release(&mut self, ts: Ts, merged: &Merged) {
         self.stats.conflicting_qty += merged.conflicting_qty;
         let due = self.trades.partition_point(|trade| trade.ts <= ts);
         let released: Vec<Trade> = self.trades.drain(..due).collect();

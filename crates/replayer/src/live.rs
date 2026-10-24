@@ -59,6 +59,66 @@ enum Outcome {
     EngineGone,
 }
 
+/// Lines waiting for the recording's writer thread.
+const RECORD_QUEUE: usize = 1024;
+
+/// Writes the lines of the recording on a thread of its own, so that a slow
+/// disk holds up a bounded queue and not the connections task's runtime.
+struct Recorder {
+    lines: Option<mpsc::Sender<String>>,
+    thread: Option<std::thread::JoinHandle<io::Result<()>>>,
+}
+
+impl Recorder {
+    fn start(mut out: Box<dyn Write + Send>) -> io::Result<Self> {
+        let (lines, mut queue) = mpsc::channel::<String>(RECORD_QUEUE);
+        let thread = std::thread::Builder::new()
+            .name("record".into())
+            .spawn(move || {
+                while let Some(line) = queue.blocking_recv() {
+                    writeln!(out, "{line}")?;
+                    out.flush()?;
+                }
+                Ok(())
+            })?;
+        Ok(Self {
+            lines: Some(lines),
+            thread: Some(thread),
+        })
+    }
+
+    /// Queues a line. If the writer has stopped, returns what stopped it.
+    async fn write(&mut self, line: String) -> io::Result<()> {
+        let sent = match &self.lines {
+            Some(lines) => lines.send(line).await.is_ok(),
+            None => false,
+        };
+        if sent {
+            return Ok(());
+        }
+        let ended = self.join().await;
+        Err(ended
+            .err()
+            .unwrap_or_else(|| io::Error::other("the recording writer stopped")))
+    }
+
+    /// Waits for the queued lines to be written.
+    async fn finish(mut self) -> io::Result<()> {
+        self.join().await
+    }
+
+    async fn join(&mut self) -> io::Result<()> {
+        self.lines = None;
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(result)) => result,
+            _ => Err(io::Error::other("the recording writer panicked")),
+        }
+    }
+}
+
 /// Serves the live book at `listener` until `shutdown` fires or the service
 /// fails, with the source at `url`. Every line received is also written to
 /// `record`, if given, as one JSON object per line.
@@ -69,7 +129,8 @@ enum Outcome {
 /// # Errors
 ///
 /// Returns an error if the service failed, the record cannot be written, or
-/// the connections task panicked.
+/// the connections task panicked. The end of the connections task for any
+/// reason stops the service.
 pub async fn serve(
     listener: TcpListener,
     url: &str,
@@ -78,7 +139,17 @@ pub async fn serve(
     retry: Retry,
 ) -> io::Result<()> {
     let (steps, mut queue) = mpsc::channel(QUEUE_CAPACITY);
-    let feeder = tokio::spawn(feed(url.to_owned(), steps, shutdown.clone(), record, retry));
+    let recorder = record.map(Recorder::start).transpose()?;
+    // However the task ends (a return or a panic), the guard stops the rest:
+    // without the connections the engine's book would only freeze.
+    let feeder = tokio::spawn({
+        let url = url.to_owned();
+        let shutdown = shutdown.clone();
+        async move {
+            let _stop = shutdown.clone().drop_guard();
+            feed(url, steps, shutdown, recorder, retry).await
+        }
+    });
     // The engine's source thread blocks here between commands. It ends when
     // the connections task drops the sender, which that task does on shutdown
     // and whenever it stops for any other reason.
@@ -96,7 +167,24 @@ async fn feed(
     url: String,
     steps: mpsc::Sender<Step>,
     shutdown: CancellationToken,
-    mut record: Option<Box<dyn Write + Send>>,
+    mut record: Option<Recorder>,
+    retry: Retry,
+) -> io::Result<()> {
+    let run = feed_loop(&url, &steps, &shutdown, &mut record, retry).await;
+    // The last lines are on disk before the service reports it has stopped.
+    let written = match record {
+        Some(recorder) => recorder.finish().await,
+        None => Ok(()),
+    };
+    run.and(written)
+}
+
+/// The loop of [`feed`].
+async fn feed_loop(
+    url: &str,
+    steps: &mpsc::Sender<Step>,
+    shutdown: &CancellationToken,
+    record: &mut Option<Recorder>,
     retry: Retry,
 ) -> io::Result<()> {
     let mut flow = L2Flow::new(engine::market(), CONNECTIONS);
@@ -104,10 +192,10 @@ async fn feed(
     let mut backoff = retry.initial;
     loop {
         let run = connected(
-            &url,
+            url,
             &mut flow,
-            &steps,
-            &mut record,
+            steps,
+            record,
             &mut number,
             &mut backoff,
             retry.initial,
@@ -141,7 +229,7 @@ async fn connected(
     url: &str,
     flow: &mut L2Flow,
     steps: &mpsc::Sender<Step>,
-    record: &mut Option<Box<dyn Write + Send>>,
+    record: &mut Option<Recorder>,
     number: &mut usize,
     backoff: &mut Duration,
     initial: Duration,
@@ -158,9 +246,8 @@ async fn connected(
             Err(err) => return Ok(Outcome::Failed(err.to_string())),
         };
         let text = value.to_string();
-        if let Some(out) = record.as_mut() {
-            writeln!(out, "{text}")?;
-            out.flush()?;
+        if let Some(recorder) = record.as_mut() {
+            recorder.write(text.clone()).await?;
         }
         *number += 1;
         let commands = match flow.line(*number, &text) {
