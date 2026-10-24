@@ -37,7 +37,7 @@ export function SpreadBar({ bestBid, bestAsk, lastTrade, market }: Props) {
               {lastTrade && (
                 <span data-side={lastTrade.side}>
                   <span className={styles.label}>Last </span>
-                  <span aria-hidden="true">
+                  <span className={styles.arrow} aria-hidden="true">
                     {lastTrade.side === "buy" ? "▲" : "▼"}
                   </span>
                   {formatUnits(lastTrade.price, decimals)}

@@ -57,6 +57,8 @@
   --weight-medium: 500;
 
   /* Spacing and shape. */
+  /* Hairline gap, e.g. between a glyph and the number it belongs to. */
+  --space-half: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

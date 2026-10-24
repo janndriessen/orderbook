@@ -37,6 +37,16 @@
   font-size: var(--text-xs);
 }
 
+/* The label's trailing space is kept for screen readers; this adds visible air
+   before the arrow. */
+.last .label {
+  margin-inline-end: var(--space-1);
+}
+
+.arrow {
+  margin-inline-end: var(--space-half);
+}
+
 .value {
   color: var(--color-text);
   font-weight: var(--weight-medium);
