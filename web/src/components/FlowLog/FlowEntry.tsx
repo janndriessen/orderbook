@@ -110,13 +110,24 @@ function Detail({ entry, market }: Props) {
   }
 }
 
+/** The clock split after its hour, so phones can hide that part. */
+function Clock({ micros }: { micros: number }) {
+  const clock = formatClock(micros);
+  return (
+    <>
+      <span className={styles.hour}>{clock.slice(0, 3)}</span>
+      {clock.slice(3)}
+    </>
+  );
+}
+
 /** Entries never change once logged, so a row re-renders only for a new market. */
 export const FlowEntry = memo(function FlowEntry({ entry, market }: Props) {
   const type = entry.body.type;
   return (
     <li className={styles.entry} data-type={type}>
       <time className={styles.time} dateTime={isoTime(entry.ts)}>
-        {formatClock(entry.ts)}
+        <Clock micros={entry.ts} />
       </time>
       <span className={styles.type}>
         {entry.body.type === "cancel_rejected"

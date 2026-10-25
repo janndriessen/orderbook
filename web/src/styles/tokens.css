@@ -92,6 +92,9 @@
   --z-toggle: 3;
   --log-time-width: 96px;
   --log-type-width: 120px;
+  /* Row columns below the phone breakpoint: time without its hour, type. */
+  --log-time-width-phone: 64px;
+  --log-type-width-phone: 64px;
   --focus-width: 2px;
 
   /* Motion. Reduced-motion users get instant changes through the duration. */

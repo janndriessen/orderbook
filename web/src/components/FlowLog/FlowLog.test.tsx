@@ -35,6 +35,16 @@ describe("FlowLog", () => {
     expect(text[3]).toContain("Accepted");
   });
 
+  it("puts the hour in its own part of the time, apart from the full timestamp", () => {
+    render(<FlowLog entries={logOf(accepted(1))} market={market} />);
+    const time = screen.getByText("22:", { selector: "span" });
+    expect(time.parentElement).toHaveTextContent("22:13:20.001");
+    expect(time.parentElement).toHaveAttribute(
+      "datetime",
+      "2023-11-14T22:13:20.001Z",
+    );
+  });
+
   it("formats quantities and prices with the market's decimals", () => {
     render(<FlowLog entries={logOf(accepted(1))} market={market} />);
     expect(items()[0]).toHaveTextContent("Buy 0.500 @ 100,000.0");

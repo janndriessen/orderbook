@@ -70,3 +70,23 @@
   margin-inline-start: auto;
   color: var(--color-text-faint);
 }
+
+/*
+ * Phones. Below 640px a row has barely 300px for three columns, so the time
+ * drops its hour (the <time> element still carries the full timestamp), order
+ * ids go and the text is a step smaller. This breakpoint is independent
+ * of the stacked layout's: it only decides when a row stops fitting.
+ */
+@media (width < 640px) {
+  .entry {
+    grid-template-columns: var(--log-time-width-phone) var(
+        --log-type-width-phone
+      ) minmax(0, 1fr);
+    font-size: var(--text-xs);
+  }
+
+  .hour,
+  .ref {
+    display: none;
+  }
+}
