@@ -2,7 +2,10 @@
   --event-color: var(--color-text);
 
   display: grid;
-  grid-template-columns: var(--log-time-width) var(--log-type-width) 1fr;
+  grid-template-columns: var(--log-time-width) var(--log-type-width) minmax(
+      0,
+      1fr
+    );
   align-items: baseline;
   height: var(--row-height);
   padding-inline: var(--space-3);
@@ -43,7 +46,11 @@
 .detail {
   display: flex;
   gap: var(--space-1);
+  min-width: 0;
+  overflow: hidden;
   color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .buy {
