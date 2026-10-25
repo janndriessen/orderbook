@@ -4,6 +4,13 @@ An exchange-style order book service and matching engine for a single market (BT
 
 Today it rebuilds Hyperliquid's live BTC book order by order through this engine (gateway, deterministic matcher, publisher) and serves it to the web UI. Recordings can be replayed, and a random-walk order flow runs without the network.
 
+## At a glance
+
+- **A real exchange core, fed by real data.** Hyperliquid's live BTC-USD book is rebuilt order by order through a gateway, a deterministic matching engine and a publisher. A production system would read per-order data from its own Hyperliquid node; as a personal project, this one rebuilds the book from Hyperliquid's public price-level feeds instead (see [Trade-offs](#trade-offs-vs-production-exchanges)). Compared side by side with Hyperliquid's own app, the book was identical on 28 of 28 updates.
+- **Fast where it counts.** The matcher handles about 10 million commands per second (about 100 ns each), and a live update costs about 0.2 ms of compute end to end.
+- **Close to the source.** Running next to the viewer, the feed is about 83 ms behind Hyperliquid's own; most of that is deliberate batching and waiting for all seven source connections.
+- **Tested like it matters.** About 600 automated tests, including fuzzing against an independent reference matcher, event for event, and checks against recorded Hyperliquid books.
+
 ## Architecture
 
 <picture>
