@@ -9,7 +9,8 @@ import { useMediaQuery } from "./useMediaQuery";
 
 /**
  * The window width below which the panes stack. Keep in sync with the media
- * query in App.module.css, which cannot read a shared value.
+ * queries in App.module.css and FlowLog.module.css, which cannot read a shared
+ * value.
  */
 const STACKED_QUERY = "(width < 1064px)";
 

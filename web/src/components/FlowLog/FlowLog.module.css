@@ -24,6 +24,15 @@
   font-size: var(--text-xs);
 }
 
+/* Stacked, the log toggle is not rendered, so the toolbar needs no room for it
+   and Pause lines up with the rows' right edge. The breakpoint must match
+   STACKED_QUERY in App.tsx, since CSS cannot read a shared value. */
+@media (width < 1064px) {
+  .toolbar {
+    padding-right: var(--space-3);
+  }
+}
+
 .filters {
   display: flex;
   gap: var(--space-1);
