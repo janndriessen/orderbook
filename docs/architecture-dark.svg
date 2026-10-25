@@ -1,29 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="680" height="650" viewBox="0 0 680 650" role="img">
-<title>Order book system architecture</title><desc>Three input sources feed a replayer, which sends commands to the order book service (gateway, matching engine, publisher). The publisher streams events to the web app and test harness; Hyperliquid data also serves as a correctness oracle for the harness.</desc>
+<title>Order book system architecture</title><desc>Hyperliquid data (recordings or a live feed) passes through the Hyperliquid adapter to the replayer, which feeds the order book service: a gateway, a matching engine and a publisher, linked by bounded in-memory queues. A built-in random walk also feeds the gateway. The publisher streams to the web app. A separate testing area has a generator (seeded fuzz flow) and scenarios (hand-written cases) feeding a test harness that works against the matching engine; Hyperliquid L2 books reach the harness as a correctness oracle (dashed).</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#9c9a92" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
 <rect width="680" height="650" fill="#0d1117"/>
 <rect x="40" y="40" width="180" height="56" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.75"/>
 <text x="130.0" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#D3D1C7" text-anchor="middle" dominant-baseline="central">Hyperliquid data</text>
 <text x="130.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Recordings or live feed</text>
-<rect x="250" y="40" width="180" height="56" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.75"/>
-<text x="340.0" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#D3D1C7" text-anchor="middle" dominant-baseline="central">Synthetic generator</text>
-<text x="340.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Random + fuzz flow</text>
-<rect x="460" y="40" width="180" height="56" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.75"/>
-<text x="550.0" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#D3D1C7" text-anchor="middle" dominant-baseline="central">Scenarios</text>
-<text x="550.0" y="78" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Hand-written tests</text>
 <path d="M130 96 L130 134" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
 <rect x="40" y="136" width="180" height="44" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
 <text x="130.0" y="158.0" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Hyperliquid adapter</text>
-<path d="M130 180 L130 200 L270 200 L270 218" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
-<path d="M340 96 L340 218" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
-<path d="M550 96 L550 200 L410 200 L410 218" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
-<rect x="190" y="220" width="300" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
-<text x="340.0" y="238" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Replayer</text>
-<text x="340.0" y="258" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">Recorded (paced or stepped) or live</text>
-<rect x="40" y="316" width="600" height="176" rx="20" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
-<text x="270" y="340" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#E6E4DC" text-anchor="start" dominant-baseline="central">Order book service</text>
-<text x="620" y="340" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="end" dominant-baseline="central">Linked by in-memory queues</text>
-<path d="M340 276 L340 296 L150 296 L150 358" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M130 180 L130 218" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="40" y="220" width="250" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
+<text x="165.0" y="238" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Replayer</text>
+<text x="165.0" y="258" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">Recorded (paced or stepped) or live</text>
+<rect x="310" y="40" width="330" height="190" rx="20" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="326" y="58" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#E6E4DC" text-anchor="start" dominant-baseline="central">Testing</text>
+<rect x="326" y="76" width="140" height="56" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.75"/>
+<text x="396.0" y="94" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#D3D1C7" text-anchor="middle" dominant-baseline="central">Generator</text>
+<text x="396.0" y="114" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Seeded fuzz flow</text>
+<rect x="484" y="76" width="140" height="56" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.75"/>
+<text x="554.0" y="94" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#D3D1C7" text-anchor="middle" dominant-baseline="central">Scenarios</text>
+<text x="554.0" y="114" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Hand-written cases</text>
+<path d="M396 132 L396 154" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M554 132 L554 154" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="326" y="156" width="298" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
+<text x="475.0" y="174" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Test harness</text>
+<text x="475.0" y="194" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">Invariants, reference matcher, benchmarks</text>
+<path d="M220 68 L290 68 L290 184 L324 184" fill="none" stroke="#9c9a92" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<rect x="40" y="316" width="600" height="192" rx="20" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="200" y="340" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#E6E4DC" text-anchor="start" dominant-baseline="central">Order book service</text>
+<text x="620" y="340" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="end" dominant-baseline="central">Linked by bounded in-memory queues</text>
+<path d="M150 276 L150 358" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
 <rect x="70" y="360" width="160" height="56" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.75"/>
 <text x="150.0" y="378" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#9FE1CB" text-anchor="middle" dominant-baseline="central">Gateway</text>
 <text x="150.0" y="398" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5DCAA5" text-anchor="middle" dominant-baseline="central">Validate + sequence</text>
@@ -35,17 +41,14 @@
 <rect x="450" y="360" width="160" height="56" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.75"/>
 <text x="530.0" y="378" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#9FE1CB" text-anchor="middle" dominant-baseline="central">Publisher</text>
 <text x="530.0" y="398" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5DCAA5" text-anchor="middle" dominant-baseline="central">Batches every 50 ms</text>
-<path d="M150 416 L150 434" fill="none" stroke="#9c9a92" stroke-width="1" stroke-dasharray="4 3"/>
-<rect x="70" y="436" width="160" height="36" rx="8" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
-<text x="150" y="454" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Journal (later)</text>
-<path d="M500 416 L500 512 L380 512 L380 530" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
-<path d="M580 416 L580 530" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
-<rect x="300" y="532" width="160" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
-<text x="380.0" y="550" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Web app</text>
-<text x="380.0" y="570" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">React, full screen</text>
-<rect x="480" y="532" width="160" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
-<text x="560.0" y="550" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Test harness</text>
-<text x="560.0" y="570" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">Checks + benchmarks</text>
-<path d="M40 68 L20 68 L20 612 L600 612 L600 590" fill="none" stroke="#9c9a92" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
-<text x="40" y="630" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="start" dominant-baseline="central">Dashed: Hyperliquid L2/L4 used as a correctness oracle</text>
+<rect x="70" y="440" width="160" height="44" rx="8" fill="none" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="150" y="458" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#E6E4DC" text-anchor="middle" dominant-baseline="central">Random walk</text>
+<text x="150" y="474" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">Built-in flow, no network</text>
+<path d="M150 440 L150 418" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M380 214 L380 358" fill="none" stroke="#9c9a92" stroke-width="1" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+<path d="M530 416 L530 546" fill="none" stroke="#9c9a92" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="450" y="548" width="160" height="56" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.75"/>
+<text x="530.0" y="566" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#CECBF6" text-anchor="middle" dominant-baseline="central">Web app</text>
+<text x="530.0" y="586" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#AFA9EC" text-anchor="middle" dominant-baseline="central">React</text>
+<text x="40" y="630" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B4B2A9" text-anchor="start" dominant-baseline="central">Dashed arrow: Hyperliquid L2 books as a correctness oracle</text>
 </svg>
