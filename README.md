@@ -116,17 +116,6 @@ Cancel cost by position in the queue, from the same bench (one run under heavy s
 
 Real BTC-USD levels are much shorter: at most about 124 orders, median 6 (see the replayed measurement under the price-levels trade-off in [Trade-offs](#trade-offs-vs-production-exchanges)).
 
-**Live pipeline, where an update's time goes** (one-off timing on the 10 s fixture and a 60 s live run, 2026-10-24):
-
-| Step                                            | Time                                          |
-| ----------------------------------------------- | --------------------------------------------- |
-| The source's own delay until a push reaches us  | p50 about 320 ms, p90 376 ms (includes clock offset) |
-| Waiting for the slowest of the seven connections | p50 20 ms, p90 115 ms                        |
-| Our compute per push                            | about 0.2 ms                                  |
-| Publish tick                                    | 0 to 50 ms, 25 ms on average (the tick is 50 ms) |
-
-Of the 0.2 ms, `L2Flow` (decode, merge, translate) takes about 86 µs, the engine about 100 µs, the queues 25 to 60 µs and the publisher's encoding about 10 µs. Nearly all of the lag a client sees is the source's.
-
 **Publish tick, 50 ms against 100 ms** (2026-10-24; two builds side by side on the live source for 3 minutes, one client each, measured with [`scripts/feed-latency.mjs`](scripts/feed-latency.mjs)):
 
 The tick is the constant `TICK` in `crates/engine/src/publisher/mod.rs`, so each build is a checkout with its own value, started on its own port (one with `from_millis(100)`, one with `from_millis(50)`):
@@ -170,8 +159,35 @@ Interpretation, not measured: the steps look like the allocator keeping its high
 - Parsing each source line once: about 3 µs per line, and it would break the record and replay path that shares the parser.
 - Compressing messages to clients: zlib makes real updates about 7 times smaller, but the WebSocket library has no permessage-deflate (already a [trade-off](#trade-offs-vs-production-exchanges)).
 
+### Latency
+
+The lag a viewer sees is mostly the source's own delay before its data reaches the service. The service itself adds tens of milliseconds, and its code less than one millisecond.
+
+Where the time goes for a live update (one-off timing on the 10 s fixture and a 60 s live run, 2026-10-24):
+
+- The source's delay until a push reaches the service: p50 about 320 ms, p90 376 ms (includes clock offset). The range 320 to 350 ms recurs across runs.
+- Waiting for the slowest of the seven source connections: p50 20 ms, p90 115 ms.
+- Compute per push: about 0.2 ms.
+- Publish tick: 0 to 50 ms, 25 ms on average.
+- Network from the service to the viewer: depends on the distance.
+- Browser: a few milliseconds.
+
+Of the 0.2 ms, `L2Flow` (decode, merge, translate) takes about 86 µs, the engine about 100 µs, the queues 25 to 60 µs and the publisher's encoding about 10 µs. Nearly all of the lag a client sees is the source's.
+
+Against the source's own feed (2026-10-25, 3 minutes each, [`scripts/feed-vs-source.mjs`](scripts/feed-vs-source.mjs)): the script subscribes to the source and to one of our feeds and, for each push, compares when it first arrives from each, on one clock, so there is no clock offset in the result.
+
+- Service on the same machine as the viewer: our feed is p50 83 ms behind the source's (p10 35, p90 238 ms); 323 of 325 pushes matched.
+- Service on a small cloud server: p50 177 ms (p10 126, p90 310 ms); 326 of 332 matched.
+
+On the same machine, about 25 ms of the 83 is the publish tick and the rest is waiting for all seven connections. On the server, the extra 95 ms or so is the detour source to server to viewer instead of source to viewer. The source's 320 to 350 ms is the same for viewers of the source's own app.
+
+```bash
+node scripts/feed-vs-source.mjs 180 ws://127.0.0.1:8080/ws
+```
+
 ## Trade-offs vs. production exchanges
 
+- **Distance to the source:** nearly all of the lag a viewer sees (about 0.3 s) is the source's delay until its data reaches the service, which runs on a general-purpose server rather than next to the source. Production market-data systems run in the same data centre as the matching engine (colocation) and measure latency in microseconds. See [Latency](#latency).
 - **Replication:** a single engine instance. Production runs several identical replicas kept in sync by a consensus protocol such as Raft, for instant failover.
 - **Persistence:** no journal or snapshots; state is lost on restart. Production journals every input and snapshots the book for fast recovery.
 - **Markets:** one market (BTC-USD). Production shards many markets across engines, each on a pinned CPU core.
