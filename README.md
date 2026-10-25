@@ -203,7 +203,18 @@ The lag includes the source's own delay and any clock offset, so only the differ
 
 **Browser** (one-off, 2026-10-24): handling one update costs about 50 µs of JavaScript (parse, book apply, grouping, flow log), measured in Node with the real modules. With the flow log open the main thread is about 1.4% busier than with it closed (production build, Chrome).
 
-**Memory:** not measured yet. An hours-long run is planned before deployment (the deployment item in the [Status](#status) roadmap).
+**Memory and clients under load** (2026-10-24 and 2026-10-25; [`scripts/feed-load.mjs`](scripts/feed-load.mjs) opens 200 WebSocket clients plus one that stops reading, against the `live` binary, and samples the server's RSS and CPU every 30 s):
+
+```bash
+node scripts/feed-load.mjs <seconds> 200 ws://127.0.0.1:8080/ws --pid <live-pid> --every 30
+```
+
+| Run                                                         | Length  | Clients                                                          | RSS                                                                                                       | CPU of `live`      |
+| ----------------------------------------------------------- | ------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------ |
+| Apple M3 Max, release build                                 | 1 hour  | None dropped; the stalled client was disconnected after 95 s     | 42 to 69 MB after a 10-minute warm-up (87 MB at most during it), no upward trend                          | 2.7% of one core   |
+| Small 2-vCPU x86-64 Linux cloud server (clients on the same machine) | 6 hours | None dropped or failed, about 8 million updates delivered; the stalled client was disconnected after 205 s | Rose in steps over the first three hours (60, 84.5, 89 MB), then flat at 88.9 to 89.3 MB for the last three | 2.4% of one core; never restarted |
+
+Interpretation, not measured: the steps look like the allocator keeping its high-water mark after busier periods rather than a leak, since memory stayed flat afterwards. A run of days would be needed to rule out a very slow leak.
 
 **Not worth it at this load:**
 
