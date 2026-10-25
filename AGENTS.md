@@ -104,7 +104,7 @@ A change that conflicts with one of these gets **flagged to the developer, not s
 ## Web
 
 - React 19, Vite, TypeScript strict, pnpm. Biome for lint and format (2-space indent, double quotes); no ESLint or Prettier.
-- Desktop browsers, with the flow log stacked below the book in narrow windows. Styling with CSS Modules on CSS custom-property tokens defined once in `src/styles/`; never raw hex values or magic numbers in components.
+- Desktop browsers, with the flow log stacked below the book, without a toggle, in narrow windows. Styling with CSS Modules on CSS custom-property tokens defined once in `src/styles/`; never raw hex values or magic numbers in components.
 - `type` over `interface`; no `any` (use `unknown` and narrow); `import type` for type-only imports.
 - The feed is the source of truth: apply snapshots and diffs by sequence number, detect gaps, resync from a snapshot. Never derive book state from the event log.
 - Prices and sizes arrive as integer ticks and lots; convert with the market's tick and lot size and format with `Intl.NumberFormat`.

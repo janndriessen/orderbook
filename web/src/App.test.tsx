@@ -79,6 +79,23 @@ describe("App", () => {
     expect(panel).toHaveAttribute("inert");
   });
 
+  it("shows the flow log without a toggle when the panes are stacked", () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    render(<App />);
+    deliver(snapshot({ events: [accepted(1)] }));
+
+    const panel = screen.getByRole("complementary", { name: "Flow log" });
+    expect(panel).not.toHaveAttribute("inert");
+    expect(within(panel).getAllByRole("listitem")).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: "Flow log" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps a paused flow log through a resync and ends the pause on a restart", async () => {
     const user = userEvent.setup();
     render(<App />);

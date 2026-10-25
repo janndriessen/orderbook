@@ -86,16 +86,13 @@
   color: var(--color-text-faint);
 }
 
-/* Stacked layout. Custom properties cannot be used in media queries, so the
-   width is spelled out: the log open splits the window in halves, and each
-   half must fit the book slot plus a gutter on both sides:
+/* Stacked layout, where the log is always shown and the toggle is not
+   rendered. Custom properties cannot be used in media queries, so the width
+   is spelled out, and STACKED_QUERY in App.tsx must match it. The log open
+   splits the window in halves, and each half must fit the book slot plus a
+   gutter on both sides:
    2 * (--book-max-width 500px + 2 * --space-4 16px) = 1064px. */
 @media (width < 1064px) {
-  .layout,
-  .layout[data-log-open="true"] {
-    --toggle-right: var(--space-4);
-  }
-
   /* The layout stays fixed to the viewport and scrolls vertically itself. */
   .layout {
     display: block;
@@ -109,17 +106,5 @@
     height: 100%;
     transform: none;
     transition: none;
-  }
-
-  /* The toggle stays in the page corner, so a book as wide as the window
-     would put its grouping menu under it. The book's own gutter matches the
-     toggle's offset from the edge, so clearing the toggle's width plus a gap
-     is enough; both sides get it to keep the book centred. */
-  .bookPane {
-    padding-inline: calc(var(--toggle-size) + var(--space-2));
-  }
-
-  .layout:not([data-log-open="true"]) .logPane {
-    display: none;
   }
 }
